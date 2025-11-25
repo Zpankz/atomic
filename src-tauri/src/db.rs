@@ -2,11 +2,15 @@ use rusqlite::ffi::sqlite3_auto_extension;
 use rusqlite::Connection;
 use sqlite_vec::sqlite3_vec_init;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 pub struct Database {
     pub conn: Mutex<Connection>,
+    pub db_path: PathBuf,
 }
+
+/// Thread-safe wrapper around Database using Arc
+pub type SharedDatabase = Arc<Database>;
 
 impl Database {
     pub fn new(app_data_dir: PathBuf) -> Result<Self, String> {
@@ -29,7 +33,15 @@ impl Database {
 
         Ok(Database {
             conn: Mutex::new(conn),
+            db_path,
         })
+    }
+
+    /// Create a new connection to the same database
+    /// This is useful for background tasks that need their own connection
+    pub fn new_connection(&self) -> Result<Connection, String> {
+        Connection::open(&self.db_path)
+            .map_err(|e| format!("Failed to open database connection: {}", e))
     }
 
     fn run_migrations(conn: &Connection) -> Result<(), String> {

@@ -62,6 +62,7 @@ pub struct EmbeddingCompletePayload {
 }
 
 /// Chunk data for internal use
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ChunkData {
     pub id: String,
