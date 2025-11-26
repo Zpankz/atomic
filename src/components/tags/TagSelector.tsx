@@ -13,6 +13,13 @@ export function TagSelector({ selectedTags, onTagsChange }: TagSelectorProps) {
   const { tags, createTag } = useTagsStore();
   const [inputValue, setInputValue] = useState('');
   const [isCreating, setIsCreating] = useState(false);
+  const [showAllSelectedTags, setShowAllSelectedTags] = useState(false);
+  
+  const MAX_VISIBLE_TAGS = 5;
+  const visibleSelectedTags = showAllSelectedTags 
+    ? selectedTags 
+    : selectedTags.slice(0, MAX_VISIBLE_TAGS);
+  const hiddenSelectedCount = selectedTags.length - MAX_VISIBLE_TAGS;
 
   // Flatten the tag tree for searching
   const flattenTags = (tags: TagWithCount[]): Tag[] => {
@@ -74,15 +81,33 @@ export function TagSelector({ selectedTags, onTagsChange }: TagSelectorProps) {
       
       {/* Selected tags */}
       {selectedTags.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 mb-2">
-          {selectedTags.map((tag) => (
-            <TagChip
-              key={tag.id}
-              name={tag.name}
-              size="md"
-              onRemove={() => handleRemoveTag(tag.id)}
-            />
-          ))}
+        <div className="space-y-1 mb-2">
+          <div className="flex flex-wrap gap-1.5">
+            {visibleSelectedTags.map((tag) => (
+              <TagChip
+                key={tag.id}
+                name={tag.name}
+                size="md"
+                onRemove={() => handleRemoveTag(tag.id)}
+              />
+            ))}
+            {!showAllSelectedTags && hiddenSelectedCount > 0 && (
+              <button
+                onClick={() => setShowAllSelectedTags(true)}
+                className="text-sm text-[#888888] hover:text-[#a78bfa] transition-colors px-2"
+              >
+                +{hiddenSelectedCount} more
+              </button>
+            )}
+          </div>
+          {showAllSelectedTags && selectedTags.length > MAX_VISIBLE_TAGS && (
+            <button
+              onClick={() => setShowAllSelectedTags(false)}
+              className="text-sm text-[#888888] hover:text-[#a78bfa] transition-colors"
+            >
+              Show less
+            </button>
+          )}
         </div>
       )}
 

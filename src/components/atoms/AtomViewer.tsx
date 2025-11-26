@@ -23,6 +23,11 @@ export function AtomViewer({ atom, onClose, onEdit }: AtomViewerProps) {
   const { setSelectedTag, closeDrawer, openDrawer } = useUIStore();
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [showAllTags, setShowAllTags] = useState(false);
+  
+  const MAX_VISIBLE_TAGS = 5;
+  const visibleTags = showAllTags ? atom.tags : atom.tags.slice(0, MAX_VISIBLE_TAGS);
+  const hiddenCount = atom.tags.length - MAX_VISIBLE_TAGS;
 
   const handleDelete = async () => {
     setIsDeleting(true);
@@ -79,15 +84,33 @@ export function AtomViewer({ atom, onClose, onEdit }: AtomViewerProps) {
       <div className="px-6 py-4 border-t border-[#3d3d3d] space-y-3">
         {/* Tags */}
         {atom.tags.length > 0 && (
-          <div className="flex flex-wrap gap-1.5">
-            {atom.tags.map((tag) => (
-              <TagChip
-                key={tag.id}
-                name={tag.name}
-                size="md"
-                onClick={() => handleTagClick(tag.id)}
-              />
-            ))}
+          <div className="space-y-1">
+            <div className="flex flex-wrap gap-1.5">
+              {visibleTags.map((tag) => (
+                <TagChip
+                  key={tag.id}
+                  name={tag.name}
+                  size="md"
+                  onClick={() => handleTagClick(tag.id)}
+                />
+              ))}
+              {!showAllTags && hiddenCount > 0 && (
+                <button
+                  onClick={() => setShowAllTags(true)}
+                  className="text-sm text-[#888888] hover:text-[#a78bfa] transition-colors px-2"
+                >
+                  +{hiddenCount} more
+                </button>
+              )}
+            </div>
+            {showAllTags && atom.tags.length > MAX_VISIBLE_TAGS && (
+              <button
+                onClick={() => setShowAllTags(false)}
+                className="text-sm text-[#888888] hover:text-[#a78bfa] transition-colors"
+              >
+                Show less
+              </button>
+            )}
           </div>
         )}
 
