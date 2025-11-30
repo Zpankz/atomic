@@ -5,9 +5,9 @@ import { AtomViewer } from '../atoms/AtomViewer';
 import { WikiViewer } from '../wiki/WikiViewer';
 import { ChatViewer } from '../chat/ChatViewer';
 import { useUIStore } from '../../stores/ui';
+import { useAtomsStore, type AtomWithTags } from '../../stores/atoms';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useKeyboard } from '../../hooks/useKeyboard';
-import type { AtomWithTags } from '../../stores/atoms';
 
 export function RightDrawer() {
   const { drawerState, closeDrawer, openDrawer } = useUIStore();
@@ -17,6 +17,11 @@ export function RightDrawer() {
 
   const [atom, setAtom] = useState<AtomWithTags | null>(null);
   const [isLoadingAtom, setIsLoadingAtom] = useState(false);
+
+  // Watch the atoms store for updates to the currently viewed atom
+  const storeAtom = useAtomsStore((s) =>
+    atomId ? s.atoms.find((a) => a.id === atomId) : undefined
+  );
 
   // Fetch atom from database when viewing
   useEffect(() => {
@@ -36,6 +41,13 @@ export function RightDrawer() {
       setAtom(null);
     }
   }, [mode, atomId]);
+
+  // Update local atom state when the store atom changes (e.g., after tag extraction)
+  useEffect(() => {
+    if (mode === 'viewer' && atomId && storeAtom && !isLoadingAtom) {
+      setAtom(storeAtom);
+    }
+  }, [mode, atomId, storeAtom, isLoadingAtom]);
 
   // Close on click outside
   useClickOutside(drawerRef, closeDrawer, isOpen);
