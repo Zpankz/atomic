@@ -11,6 +11,7 @@ interface DrawerState {
   tagId: string | null;       // For wiki and chat modes
   tagName: string | null;     // For wiki mode (display purposes)
   conversationId: string | null;  // For chat mode
+  highlightText: string | null;   // For viewer mode (text to highlight and scroll to)
 }
 
 interface LocalGraphState {
@@ -37,7 +38,7 @@ interface UIStore {
   highlightedAtomId: string | null;
   // Actions
   setSelectedTag: (tagId: string | null) => void;
-  openDrawer: (mode: DrawerMode, atomId?: string) => void;
+  openDrawer: (mode: DrawerMode, atomId?: string, highlightText?: string) => void;
   openWikiDrawer: (tagId: string, tagName: string) => void;
   openChatDrawer: (tagId?: string, conversationId?: string) => void;
   closeDrawer: () => void;
@@ -67,6 +68,7 @@ export const useUIStore = create<UIStore>()(
         tagId: null,
         tagName: null,
         conversationId: null,
+        highlightText: null,
       },
       viewMode: 'canvas',  // Default to canvas view
       searchQuery: '',
@@ -81,7 +83,7 @@ export const useUIStore = create<UIStore>()(
 
       setSelectedTag: (tagId: string | null) => set({ selectedTagId: tagId }),
 
-      openDrawer: (mode: DrawerMode, atomId?: string) =>
+      openDrawer: (mode: DrawerMode, atomId?: string, highlightText?: string) =>
         set({
           drawerState: {
             isOpen: true,
@@ -90,6 +92,7 @@ export const useUIStore = create<UIStore>()(
             tagId: null,
             tagName: null,
             conversationId: null,
+            highlightText: highlightText || null,
           },
         }),
 
@@ -102,6 +105,7 @@ export const useUIStore = create<UIStore>()(
             tagId,
             tagName,
             conversationId: null,
+            highlightText: null,
           },
         }),
 
@@ -114,6 +118,7 @@ export const useUIStore = create<UIStore>()(
             tagId: tagId || null,
             tagName: null,
             conversationId: conversationId || null,
+            highlightText: null,
           },
         }),
 
@@ -122,6 +127,7 @@ export const useUIStore = create<UIStore>()(
           drawerState: {
             ...state.drawerState,
             isOpen: false,
+            highlightText: null,
           },
         })),
 

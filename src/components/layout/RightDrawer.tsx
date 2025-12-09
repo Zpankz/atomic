@@ -25,7 +25,7 @@ export function RightDrawer() {
   const drawerRef = useRef<HTMLDivElement>(null);
   const openTimeRef = useRef<number | null>(null);
 
-  const { isOpen, mode, atomId, tagId, tagName, conversationId } = drawerState;
+  const { isOpen, mode, atomId, tagId, tagName, conversationId, highlightText } = drawerState;
 
   const [atom, setAtom] = useState<AtomWithTags | null>(null);
   const [isLoadingAtom, setIsLoadingAtom] = useState(false);
@@ -156,7 +156,7 @@ export function RightDrawer() {
           break;
         }
         contentType = 'viewer-atom';
-        result = <AtomViewer atom={atom} onClose={closeDrawer} onEdit={handleEdit} />;
+        result = <AtomViewer atom={atom} onClose={closeDrawer} onEdit={handleEdit} highlightText={highlightText} />;
         break;
       case 'wiki':
         if (!isOpen) {

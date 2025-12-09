@@ -181,7 +181,7 @@ export const useAtomsStore = create<AtomsStore>((set) => ({
       const results = await invoke<SemanticSearchResult[]>('search_atoms_semantic', {
         query,
         limit: 20,
-        threshold: 0.3,
+        threshold: 0.4,
       });
       set({ semanticSearchResults: results, isSearching: false });
     } catch (error) {

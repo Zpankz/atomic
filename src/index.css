@@ -154,6 +154,27 @@ mark.search-highlight[data-current="true"] {
   outline: 2px solid var(--color-accent);
 }
 
+/* Initial highlight from semantic search - fades out after 5 seconds */
+.initial-highlight,
+[data-initial-highlight] {
+  background-color: var(--color-accent);
+  color: white;
+  padding: 0 2px;
+  border-radius: 2px;
+  animation: highlight-fade 5s ease-out forwards;
+}
+
+@keyframes highlight-fade {
+  0%, 70% {
+    background-color: var(--color-accent);
+    color: white;
+  }
+  100% {
+    background-color: transparent;
+    color: inherit;
+  }
+}
+
 /* Markdown image styles */
 .markdown-image-wrapper {
   display: block;

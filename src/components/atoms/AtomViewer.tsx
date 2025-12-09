@@ -14,7 +14,7 @@ import { useTagsStore } from '../../stores/tags';
 import { useUIStore } from '../../stores/ui';
 import { useContentSearch } from '../../hooks';
 import { formatDate } from '../../lib/date';
-import { chunkMarkdown } from '../../lib/markdown';
+import { chunkMarkdown, findChunkIndexForOffset } from '../../lib/markdown';
 
 // Benchmarking helper
 const PERF_DEBUG = true;
@@ -31,6 +31,7 @@ interface AtomViewerProps {
   atom: AtomWithTags;
   onClose: () => void;
   onEdit: () => void;
+  highlightText?: string | null;  // Raw text to highlight and scroll to (from semantic search)
 }
 
 // Progressive rendering configuration
@@ -39,7 +40,7 @@ const INITIAL_CHUNKS = 1; // Render 1 chunk immediately
 const CHUNKS_PER_BATCH = 2; // Render 2 chunks at a time to reduce re-renders
 const CHUNK_DELAY = 32; // ~2 frames between batches
 
-export function AtomViewer({ atom, onClose, onEdit }: AtomViewerProps) {
+export function AtomViewer({ atom, onClose, onEdit, highlightText }: AtomViewerProps) {
   const mountTimeRef = useRef(performance.now());
   const renderCountRef = useRef(0);
 
@@ -49,6 +50,11 @@ export function AtomViewer({ atom, onClose, onEdit }: AtomViewerProps) {
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [metadataExpanded, setMetadataExpanded] = useState(false);
+
+  // Initial highlight state (from semantic search)
+  const [initialHighlight, setInitialHighlight] = useState<string | null>(null);
+  const [targetChunkIndex, setTargetChunkIndex] = useState<number | null>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
 
   // Progressive rendering: chunk the content
   const chunks = useMemo(() => {
@@ -91,6 +97,57 @@ export function AtomViewer({ atom, onClose, onEdit }: AtomViewerProps) {
   useEffect(() => {
     setRenderedChunkCount(INITIAL_CHUNKS);
   }, [atom.id]);
+
+  // Calculate target chunk and highlight query from highlightText prop
+  useEffect(() => {
+    if (highlightText && atom.content) {
+      // Find position of matching chunk in raw content
+      const offset = atom.content.indexOf(highlightText);
+      if (offset !== -1) {
+        // Calculate which render chunk contains this offset
+        const chunkIndex = findChunkIndexForOffset(atom.content, offset, CHUNK_SIZE);
+        setTargetChunkIndex(chunkIndex);
+        // Use first ~50 chars as highlight query for uniqueness
+        setInitialHighlight(highlightText.slice(0, 50).trim());
+        perfLog(`Initial highlight: targeting chunk ${chunkIndex} at offset ${offset}`);
+      }
+    } else {
+      setInitialHighlight(null);
+      setTargetChunkIndex(null);
+    }
+  }, [highlightText, atom.content]);
+
+  // Ensure target chunk is rendered, then scroll to highlighted element
+  useEffect(() => {
+    if (targetChunkIndex === null || initialHighlight === null) return;
+
+    if (targetChunkIndex >= renderedChunkCount) {
+      // Need to render more chunks to reach target - force immediate render
+      setRenderedChunkCount(targetChunkIndex + 1);
+      return;
+    }
+
+    // Target chunk is rendered - scroll to highlighted element after DOM update
+    const scrollTimeout = setTimeout(() => {
+      const mark = document.querySelector('[data-initial-highlight]');
+      if (mark && scrollContainerRef.current) {
+        mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        perfLog('Scrolled to initial highlight');
+      }
+    }, 100); // Small delay to ensure DOM is ready
+
+    // Clear highlight after 5 seconds
+    const clearTimeout_ = setTimeout(() => {
+      setInitialHighlight(null);
+      setTargetChunkIndex(null);
+      perfLog('Initial highlight cleared');
+    }, 5000);
+
+    return () => {
+      clearTimeout(scrollTimeout);
+      clearTimeout(clearTimeout_);
+    };
+  }, [targetChunkIndex, renderedChunkCount, initialHighlight]);
 
   // Track mount/unmount and render count
   useEffect(() => {
@@ -153,15 +210,64 @@ export function AtomViewer({ atom, onClose, onEdit }: AtomViewerProps) {
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [openSearch]);
 
-  // Wrap children with search highlighting
+  // Helper to highlight initial search text (from semantic search)
+  const highlightInitialText = useCallback(
+    (text: string): ReactNode => {
+      if (!initialHighlight || !text) return text;
+
+      const lowerText = text.toLowerCase();
+      const lowerQuery = initialHighlight.toLowerCase();
+      const index = lowerText.indexOf(lowerQuery);
+
+      if (index === -1) return text;
+
+      const before = text.slice(0, index);
+      const match = text.slice(index, index + initialHighlight.length);
+      const after = text.slice(index + initialHighlight.length);
+
+      return (
+        <>
+          {before}
+          <mark data-initial-highlight="true" className="initial-highlight">
+            {match}
+          </mark>
+          {after}
+        </>
+      );
+    },
+    [initialHighlight]
+  );
+
+  // Process children recursively for initial highlight
+  const processInitialHighlight = useCallback(
+    (children: ReactNode): ReactNode => {
+      if (typeof children === 'string') {
+        return highlightInitialText(children);
+      }
+      if (Array.isArray(children)) {
+        return children.map((child, i) => (
+          <span key={i}>{processInitialHighlight(child)}</span>
+        ));
+      }
+      return children;
+    },
+    [highlightInitialText]
+  );
+
+  // Wrap children with search highlighting (both manual search and initial highlight)
   const wrapWithHighlight = useCallback(
     (children: ReactNode): ReactNode => {
-      if (!isSearchOpen || !searchQuery.trim()) {
-        return children;
+      // First apply initial highlight if active
+      if (initialHighlight) {
+        return processInitialHighlight(children);
       }
-      return processChildren(children);
+      // Then apply manual search highlight if active
+      if (isSearchOpen && searchQuery.trim()) {
+        return processChildren(children);
+      }
+      return children;
     },
-    [isSearchOpen, searchQuery, processChildren]
+    [isSearchOpen, searchQuery, processChildren, initialHighlight, processInitialHighlight]
   );
 
   // Memoize markdown components to prevent re-renders from resetting image loading states
@@ -325,7 +431,7 @@ export function AtomViewer({ atom, onClose, onEdit }: AtomViewerProps) {
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto px-6 py-4 relative">
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-6 py-4 relative">
         {/* Search bar */}
         {isSearchOpen && (
           <SearchBar

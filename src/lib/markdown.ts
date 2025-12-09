@@ -28,6 +28,30 @@ export function isValidUrl(url: string): boolean {
 }
 
 /**
+ * Find which chunk index contains a given character offset.
+ * Used to scroll to the correct chunk when highlighting semantic search results.
+ */
+export function findChunkIndexForOffset(
+  content: string,
+  offset: number,
+  chunkSize: number = 8000
+): number {
+  const chunks = chunkMarkdown(content, chunkSize);
+  let currentOffset = 0;
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunkEnd = currentOffset + chunks[i].length;
+    if (offset >= currentOffset && offset < chunkEnd) {
+      return i;
+    }
+    // Account for the \n\n separator that was split on
+    currentOffset = chunkEnd + 2;
+  }
+
+  return chunks.length - 1; // Default to last chunk
+}
+
+/**
  * Split markdown content into chunks for progressive rendering.
  * Splits at paragraph boundaries (double newlines) to avoid breaking
  * markdown structure like code blocks, lists, or blockquotes.

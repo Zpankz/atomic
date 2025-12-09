@@ -52,7 +52,9 @@ export function MainView() {
   };
 
   const handleAtomClick = (atomId: string) => {
-    openDrawer('viewer', atomId);
+    // Pass matching chunk content for highlighting when coming from semantic search
+    const matchingContent = getMatchingChunkContent(atomId);
+    openDrawer('viewer', atomId, matchingContent);
   };
 
   const handleNewAtom = () => {
