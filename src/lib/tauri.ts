@@ -228,3 +228,19 @@ export async function verifyProviderConfigured(): Promise<boolean> {
   return invoke('verify_provider_configured');
 }
 
+// Import types and commands
+export interface ImportResult {
+  imported: number;
+  skipped: number;
+  errors: number;
+  tags_created: number;
+  tags_linked: number;
+}
+
+export async function importObsidianVault(
+  vaultPath: string,
+  maxNotes?: number
+): Promise<ImportResult> {
+  return invoke('import_obsidian_vault', { vaultPath, maxNotes });
+}
+

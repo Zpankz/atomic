@@ -24,6 +24,8 @@ use tauri::path::BaseDirectory;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             let app_data_dir = app
                 .path()
@@ -129,6 +131,8 @@ pub fn run() {
             agent::send_chat_message,
             // Tag compaction
             commands::compact_tags,
+            // Import commands
+            commands::import_obsidian_vault,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

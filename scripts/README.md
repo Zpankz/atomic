@@ -2,6 +2,84 @@
 
 This directory contains utility scripts for the Atomic application.
 
+## Obsidian Import Script
+
+The `import/obsidian.js` script imports notes from an Obsidian vault into Atomic.
+
+### Features
+
+- Imports all markdown files from an Obsidian vault
+- Extracts tags from folder structure (e.g., `Projects/Work/note.md` → tags: "Projects", "Work")
+- Extracts tags from YAML frontmatter
+- Preserves `[[wikilinks]]` and `![[embeds]]` as-is in content
+- Deduplicates by source URL (re-importing the same vault skips existing notes)
+- Supports dry-run mode to preview what would be imported
+
+### Usage
+
+```bash
+# From the app's Settings modal (recommended)
+# Click "Import from Obsidian" and select your vault folder
+
+# Or via CLI:
+npm run import:obsidian /path/to/vault
+
+# Import with a maximum number of notes
+npm run import:obsidian /path/to/vault -- --max 100
+
+# Dry run to see what would be imported
+npm run import:obsidian /path/to/vault -- --dry-run
+
+# Exclude additional patterns
+npm run import:obsidian /path/to/vault -- --exclude "Templates/**"
+
+# Custom database path
+npm run import:obsidian /path/to/vault -- --db /path/to/atomic.db
+```
+
+### CLI Options
+
+| Option | Description |
+|--------|-------------|
+| `--max <n>` | Maximum number of notes to import |
+| `--exclude <pattern>` | Additional glob patterns to exclude (can use multiple times) |
+| `--dry-run` | Show what would be imported without importing |
+| `--json-output` | Output results as JSON (for programmatic use) |
+| `--db <path>` | Custom database path |
+| `-h, --help` | Show help message |
+
+### Default Exclusions
+
+The importer automatically excludes:
+- `.obsidian/**` (Obsidian configuration)
+- `.trash/**` (Obsidian trash)
+- `.git/**` (Git repository)
+- `node_modules/**`
+
+### Tag Mapping
+
+Tags are extracted from two sources:
+
+1. **Folder structure**: Each folder level becomes a tag
+   - `Projects/Work/meeting-notes.md` → Tags: "Projects", "Work"
+
+2. **YAML frontmatter**: The `tags` field is extracted
+   - Supports array format: `tags: [topic1, topic2]`
+   - Supports comma-separated: `tags: topic1, topic2`
+
+### Wikilinks
+
+Obsidian's `[[wikilinks]]` and `![[embeds]]` are preserved as-is in the imported content. This allows for potential future linking features and keeps your notes readable.
+
+### After Import
+
+1. Open the Atomic app
+2. Embeddings will process automatically in the background
+3. Tags extracted from folders/frontmatter are linked immediately
+4. AI auto-tagging (if enabled) will add additional tags
+
+---
+
 ## Wikipedia Import Script
 
 The `import-wikipedia.js` script fetches Wikipedia articles and imports them into the Atomic database for stress testing.

@@ -36,6 +36,8 @@ interface UIStore {
   // Local graph state
   localGraph: LocalGraphState;
   highlightedAtomId: string | null;
+  // Command palette state
+  commandPaletteOpen: boolean;
   // Actions
   setSelectedTag: (tagId: string | null) => void;
   openDrawer: (mode: DrawerMode, atomId?: string, highlightText?: string) => void;
@@ -56,6 +58,10 @@ interface UIStore {
   setHighlightedAtom: (atomId: string | null) => void;
   // Canvas navigation
   locateOnCanvas: (atomId: string) => void;
+  // Command palette actions
+  openCommandPalette: () => void;
+  closeCommandPalette: () => void;
+  toggleCommandPalette: () => void;
 }
 
 export const useUIStore = create<UIStore>()(
@@ -81,6 +87,7 @@ export const useUIStore = create<UIStore>()(
         navigationHistory: [],
       },
       highlightedAtomId: null,
+      commandPaletteOpen: false,
 
       setSelectedTag: (tagId: string | null) => set({ selectedTagId: tagId }),
 
@@ -232,6 +239,12 @@ export const useUIStore = create<UIStore>()(
             isOpen: false,
           },
         })),
+
+      // Command palette actions
+      openCommandPalette: () => set({ commandPaletteOpen: true }),
+      closeCommandPalette: () => set({ commandPaletteOpen: false }),
+      toggleCommandPalette: () =>
+        set((state) => ({ commandPaletteOpen: !state.commandPaletteOpen })),
     }),
     {
       name: 'atomic-ui-storage',

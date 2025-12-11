@@ -4,8 +4,10 @@ import { MainView } from './MainView';
 import { RightDrawer } from './RightDrawer';
 import { LoadingIndicator } from '../ui/LoadingIndicator';
 import { SettingsModal } from '../settings/SettingsModal';
+import { CommandPalette } from '../command-palette';
 import { useAtomsStore } from '../../stores/atoms';
 import { useTagsStore } from '../../stores/tags';
+import { useUIStore } from '../../stores/ui';
 import { useTheme } from '../../hooks';
 import { resetStuckProcessing, processPendingEmbeddings, processPendingTagging, verifyProviderConfigured } from '../../lib/tauri';
 
@@ -14,6 +16,51 @@ export function Layout() {
   const { fetchAtoms } = useAtomsStore();
   const { fetchTags } = useTagsStore();
   const [isSetupRequired, setIsSetupRequired] = useState<boolean | null>(null); // null = checking
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // Command palette state
+  const commandPaletteOpen = useUIStore((state) => state.commandPaletteOpen);
+  const toggleCommandPalette = useUIStore((state) => state.toggleCommandPalette);
+  const closeCommandPalette = useUIStore((state) => state.closeCommandPalette);
+  const openDrawer = useUIStore((state) => state.openDrawer);
+
+  // Global keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't trigger shortcuts when typing in input fields (except for command palette toggle)
+      const isInputActive =
+        document.activeElement?.tagName === 'INPUT' ||
+        document.activeElement?.tagName === 'TEXTAREA' ||
+        (document.activeElement as HTMLElement)?.isContentEditable;
+
+      // Cmd+P or Ctrl+P to toggle command palette (works even in inputs)
+      if ((e.metaKey || e.ctrlKey) && e.key === 'p') {
+        e.preventDefault();
+        toggleCommandPalette();
+        return;
+      }
+
+      // Skip other shortcuts if input is active
+      if (isInputActive) return;
+
+      // Cmd+N or Ctrl+N to create new atom (only when palette is closed)
+      if ((e.metaKey || e.ctrlKey) && e.key === 'n' && !commandPaletteOpen) {
+        e.preventDefault();
+        openDrawer('editor');
+        return;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [toggleCommandPalette, openDrawer, commandPaletteOpen]);
+
+  // Listen for custom settings event from command palette
+  useEffect(() => {
+    const handleOpenSettings = () => setSettingsOpen(true);
+    window.addEventListener('open-settings', handleOpenSettings);
+    return () => window.removeEventListener('open-settings', handleOpenSettings);
+  }, []);
 
   // Check if setup is needed on mount
   useEffect(() => {
@@ -115,6 +162,14 @@ export function Layout() {
       <MainView />
       <RightDrawer />
       <LoadingIndicator />
+      <CommandPalette
+        isOpen={commandPaletteOpen}
+        onClose={closeCommandPalette}
+      />
+      <SettingsModal
+        isOpen={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+      />
     </div>
   );
 }
