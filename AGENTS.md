@@ -1,665 +1,145 @@
-# Atomic - Note-Taking Desktop Application
+# Atomic
 
-## Project Overview
-Atomic is a Tauri v2 desktop application for note-taking with a React frontend. It features markdown editing, hierarchical tagging, AI-powered semantic search using embeddings, automatic tag extraction, wiki article synthesis using OpenRouter LLM, and an interactive canvas view for spatial atom visualization.
+Atomic is a personal knowledge base that turns freeform markdown notes ("atoms") into a semantically-connected, AI-augmented knowledge graph. It runs as a Tauri desktop app, a headless HTTP server, or both simultaneously.
+
+## Core Concepts
+
+**Atoms** are the fundamental unit — markdown notes with optional source URLs and hierarchical tags. When an atom is created or updated, an asynchronous pipeline automatically:
+1. Chunks the content using markdown-aware boundaries (respecting code blocks, headers, paragraphs)
+2. Generates vector embeddings via the configured AI provider
+3. Extracts and assigns tags using LLM structured outputs (if auto-tagging is enabled)
+4. Builds semantic edges to other atoms based on embedding similarity
+
+This pipeline is fire-and-forget from the caller's perspective — the caller receives the saved atom immediately while embedding/tagging runs in the background, with progress reported via callbacks.
+
+**Tags** form a hierarchical tree. Auto-extracted tags are organized under category parents (Topics, People, Locations, Organizations, Events). Tags serve as both organizational structure and scoping mechanism for wiki generation and chat conversations.
+
+**Wiki articles** are LLM-synthesized summaries of all atoms under a given tag, with inline citations linking back to source atoms. They support incremental updates — when new atoms are tagged, only the new content is sent to the LLM to integrate into the existing article.
+
+**Chat** is an agentic RAG system. Conversations can be scoped to specific tags, and the agent has tools to search the knowledge base semantically during conversation. Responses stream back through the same callback system used by embeddings.
+
+**Canvas** is a spatial visualization where atoms are positioned using d3-force simulation. Atoms sharing tags are linked, and a custom similarity force pulls semantically-related atoms together. Positions are persisted so the layout is stable across sessions.
+
+## Architecture: Core + Thin Wrappers
+
+The central architectural principle is the separation of **business logic** from **transport**. All domain logic lives in `atomic-core`, a standalone Rust crate with no framework dependencies. Every client is a thin wrapper that adapts `atomic-core` to a specific transport mechanism.
+
+```
+                    ┌─────────────────┐
+                    │   atomic-core   │
+                    │  (all logic)    │
+                    └────────┬────────┘
+              ┌──────────────┼──────────────┐
+              ▼              ▼              ▼
+    ┌─────────────┐  ┌──────────────┐  ┌──────────┐
+    │  src-tauri   │  │atomic-server │  │atomic-mcp│
+    │ (Tauri IPC)  │  │ (REST + WS)  │  │  (MCP)   │
+    └──────┬──────┘  └──────┬───────┘  └──────────┘
+           │                │
+    ┌──────▼──────┐  ┌──────▼───────┐
+    │   React UI   │  │  Any HTTP    │
+    │(Tauri or HTTP)│  │   client    │
+    └─────────────┘  └──────────────┘
+```
+
+### `atomic-core` — The Facade
+
+`AtomicCore` is a `Clone` wrapper around `Arc<Database>` that exposes every operation: CRUD, search, embedding, wiki generation, chat, clustering, tag compaction, and import. It is completely transport-agnostic.
+
+The key design decision is **callback-based eventing**: operations that produce async events (embedding, chat) accept `Fn(EmbeddingEvent)` or `Fn(ChatEvent)` closures. The core doesn't know or care how events are delivered — it just calls the closure. This makes it usable from any Rust context without pulling in Tauri, actix, or any framework.
+
+### `src-tauri` — Desktop Wrapper
+
+The Tauri app stores `AtomicCore` in managed state and exposes ~40 commands. Each command is a thin wrapper: unpack IPC args, call `core.method()`, return the result. For evented operations, it creates closures that bridge `EmbeddingEvent`/`ChatEvent` → `app_handle.emit()`, which the React frontend listens to via Tauri's `listen()` API.
+
+The Tauri app also spawns an embedded actix-web server on port 44380 for the browser extension and MCP integration.
+
+### `atomic-server` — Headless HTTP Wrapper
+
+The standalone server wraps `atomic-core` with a full REST API (~47 endpoints) plus a WebSocket endpoint. The same thin-wrapper pattern applies: each route handler unpacks HTTP request params, calls `core.method()`, returns JSON.
+
+Events flow through `tokio::sync::broadcast` — route handlers send `ServerEvent` variants into the channel, and WebSocket clients receive them. The event bridge converts `atomic-core` callbacks into broadcast messages, mirroring how Tauri bridges them to `app_handle.emit()`.
+
+Authentication uses named, revocable API tokens stored as SHA-256 hashes. A default token is auto-created on first run. Managed via CLI subcommands or REST endpoints.
+
+### Frontend Transport Abstraction
+
+The React frontend defines a `Transport` interface with `invoke()` and `subscribe()` methods. At startup, it auto-detects whether Tauri IPC is available:
+- **TauriTransport**: Direct pass-through to Tauri's `invoke()` and `listen()`
+- **HttpTransport**: Maps Tauri command names to HTTP specs (method, path, body/query transforms) via a command map, and normalizes WebSocket `ServerEvent` messages back into the same event names the Tauri transport uses
+
+This means the React code is transport-unaware — it calls `transport.invoke('create_atom', args)` and `transport.subscribe('embedding-complete', handler)` regardless of whether it's running inside Tauri or connected to `atomic-server` over HTTP.
+
+## AI Provider Abstraction
+
+AI capabilities are pluggable via trait-based providers:
+- `EmbeddingProvider` — batch embedding generation
+- `LlmProvider` — chat completions
+- `StreamingLlmProvider` — streaming completions with tool calling
+
+Two implementations exist: **OpenRouter** (cloud, default) and **Ollama** (local). Factory functions return `Arc<dyn Trait>` based on the configured provider type. Adding a new provider requires implementing the traits and adding a factory branch — no changes to embedding, wiki, chat, or any consumer code.
+
+Provider configuration is stored in the settings table (SQLite key-value pairs). OpenRouter uses separate model settings for embedding, tagging, wiki, and chat. Ollama auto-discovers available models from the running server.
+
+## Workspace Structure
+
+```
+Cargo.toml                  # Workspace root
+crates/atomic-core/         # All business logic (no framework deps)
+crates/atomic-server/       # Headless REST + WebSocket server
+crates/atomic-mcp/          # Standalone MCP server binary
+crates/mcp-bridge/          # HTTP-to-stdio MCP bridge
+src-tauri/                  # Tauri desktop app (thin wrapper)
+src/                        # React frontend (TypeScript)
+scripts/                    # Import, build, and database utilities
+```
 
 ## Tech Stack
-- **Desktop Framework**: Tauri v2 (Rust backend)
-- **Frontend**: React 18+ with TypeScript
-- **Build Tool**: Vite 6
-- **Styling**: Tailwind CSS v4 (using `@tailwindcss/vite` plugin)
-- **State Management**: Zustand 5 (with persist middleware for UI preferences)
-- **Database**: SQLite with sqlite-vec extension (via rusqlite)
-- **Embeddings**: OpenRouter-based embeddings (default model: openai/text-embedding-3-small)
-- **LLM Provider**: OpenRouter API (configurable model, default: openai/gpt-4o-mini for tagging)
-- **HTTP Client**: reqwest (Rust)
-- **Markdown Editor**: CodeMirror 6 (`@uiw/react-codemirror`)
-- **Markdown Rendering**: react-markdown with remark-gfm
-- **Canvas Visualization**: d3-force (simulation), react-zoom-pan-pinch (zoom/pan)
 
-## Project Structure
-```
-/scripts
-  import-wikipedia.js  # Bulk import Wikipedia articles for stress testing
-  README.md            # Documentation for scripts
-
-/src-tauri
-  /src
-    main.rs           # Tauri entry point
-    lib.rs            # App setup, command registration
-    db.rs             # SQLite setup, migrations
-    models.rs         # Rust structs for data
-    chunking.rs       # Content chunking algorithm
-    embedding.rs      # Embedding generation + tag extraction pipeline
-    extraction.rs     # Tag extraction logic using provider abstraction
-    search.rs         # Unified search (semantic, keyword, hybrid)
-    wiki.rs           # Wiki article generation and update logic
-    settings.rs       # Settings CRUD operations
-    chat.rs           # Conversation CRUD and scope management
-    agent.rs          # Agentic chat loop with tool calling and streaming
-    clustering.rs     # Atom clustering for canvas visualization
-    compaction.rs     # Tag compaction using LLM
-    /commands         # Tauri command implementations (organized by domain)
-      mod.rs          # Re-exports all commands
-      helpers.rs      # Shared helper functions
-      atoms.rs        # Atom CRUD operations
-      tags.rs         # Tag CRUD operations
-      embedding.rs    # Embedding and search commands
-      settings.rs     # Settings and model discovery
-      wiki.rs         # Wiki article operations
-      canvas.rs       # Canvas position management
-      graph.rs        # Semantic graph operations
-      clustering.rs   # Clustering commands
-      ollama.rs       # Ollama-specific commands
-      utils.rs        # Utility commands (sqlite-vec check, tag compaction)
-    /providers        # Pluggable AI provider abstraction
-      mod.rs          # Module exports
-      types.rs        # Message, ToolCall, CompletionResponse, StreamDelta, etc.
-      error.rs        # ProviderError enum with retry support
-      traits.rs       # EmbeddingProvider, LlmProvider, StreamingLlmProvider traits
-      registry.rs     # Provider factory (for future multi-provider support)
-      /openrouter     # OpenRouter provider implementation
-        mod.rs        # OpenRouterProvider combining embedding + LLM
-        embedding.rs  # Embedding API calls
-        llm.rs        # Chat completion + streaming
-  Cargo.toml
-  tauri.conf.json
-
-/src
-  /components
-    /layout           # LeftPanel, MainView, RightDrawer, Layout
-    /atoms            # AtomCard, AtomEditor, AtomViewer, AtomGrid, AtomList, RelatedAtoms
-    /canvas           # CanvasView, CanvasContent, AtomNode, ConnectionLines, CanvasControls, useForceSimulation
-    /tags             # TagTree, TagNode, TagChip, TagSelector
-    /wiki             # WikiViewer, WikiArticleContent, WikiHeader, WikiEmptyState, WikiGenerating, CitationLink, CitationPopover
-    /chat             # ChatViewer, ConversationsList, ConversationCard, ChatView, ChatHeader, ChatMessage, ChatInput, ScopeEditor
-    /search           # SemanticSearch
-    /settings         # SettingsModal, SettingsButton
-    /ui               # Button, Input, Modal, FAB, ContextMenu
-  /stores             # Zustand stores (atoms.ts, tags.ts, ui.ts, settings.ts, wiki.ts, chat.ts)
-  /hooks              # Custom hooks (useClickOutside, useKeyboard, useEmbeddingEvents, useChatEvents)
-  /lib                # Utilities (tauri.ts, markdown.ts, date.ts, similarity.ts)
-  App.tsx
-  main.tsx
-  index.css           # Tailwind imports + custom animations
-
-/index.html
-/vite.config.ts
-/package.json
-```
+- **Core**: Rust, SQLite + sqlite-vec (vector search), rusqlite, tokio, reqwest
+- **Desktop**: Tauri v2
+- **Server**: actix-web, clap (CLI), tokio broadcast channels
+- **Frontend**: React 18, TypeScript, Vite 6, Tailwind CSS v4, Zustand 5
+- **Editor**: CodeMirror 6 (markdown editing), react-markdown (rendering)
+- **Canvas**: d3-force (simulation), react-zoom-pan-pinch (interaction)
+- **Virtualization**: @tanstack/react-virtual
+- **AI**: OpenRouter or Ollama (pluggable), tiktoken for token counting
 
 ## Common Commands
 
-### Development
 ```bash
-# Install dependencies
-npm install
+# Development
+npm run tauri dev             # Desktop app (frontend + Tauri)
+npm run dev                   # Frontend only
+cargo check                   # Check all workspace crates
+cargo test                    # Run all tests
+cargo check -p atomic-core    # Check specific crate
 
-# Run development server (frontend only)
-npm run dev
+# Standalone server
+cargo run -p atomic-server -- --db-path /path/to/atomic.db serve --port 8080
 
-# Run development server (frontend + Tauri)
-npm run tauri dev
+# Token management
+cargo run -p atomic-server -- --db-path /path/to/atomic.db token create --name "my-laptop"
+cargo run -p atomic-server -- --db-path /path/to/atomic.db token list
+cargo run -p atomic-server -- --db-path /path/to/atomic.db token revoke <token-id>
 
-# Build for production
+# Production
 npm run tauri build
-
-# Type check
-npm run build
-```
-
-### Rust Backend
-```bash
-# Check Rust code
-cd src-tauri && cargo check
-
-# Build Rust code
-cd src-tauri && cargo build
-
-# Run tests (including chunking tests)
-cd src-tauri && cargo test
-```
-
-### Utility Scripts
-```bash
-# Import Wikipedia articles for stress testing (requires app to be run once first)
-npm run import:wikipedia        # Import 500 articles (default)
-npm run import:wikipedia 1000   # Import custom number of articles
-npm run import:wikipedia 500 --db /path/to/atomic.db  # Custom database path
+npm run release:patch         # Bump version and build
 ```
 
 ## Database
 
-### Location
-The SQLite database is stored in the Tauri app data directory:
+SQLite with sqlite-vec extension. Location varies by platform:
 - macOS: `~/Library/Application Support/com.atomic.app/atomic.db`
 - Linux: `~/.local/share/com.atomic.app/atomic.db`
-- Windows: `%APPDATA%/com.atomic.app/atomic.db`
 
-### Schema
-```sql
--- Core content units
-CREATE TABLE atoms (
-  id TEXT PRIMARY KEY,  -- UUID
-  content TEXT NOT NULL,
-  source_url TEXT,
-  created_at TEXT NOT NULL,  -- ISO 8601
-  updated_at TEXT NOT NULL,
-  embedding_status TEXT DEFAULT 'pending'  -- 'pending', 'processing', 'complete', 'failed'
-);
+Migrations run automatically on startup. The schema includes tables for atoms, tags, chunks, embeddings, wiki articles, conversations, messages, semantic edges, atom positions, settings, and API tokens.
 
--- Hierarchical tags
-CREATE TABLE tags (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  parent_id TEXT REFERENCES tags(id) ON DELETE SET NULL,
-  created_at TEXT NOT NULL
-);
+Similarity is computed from sqlite-vec's Euclidean distance on normalized vectors: `similarity = 1.0 - (distance / 2.0)`. Default thresholds: 0.7 for related atoms, 0.3 for semantic search and wiki chunk selection.
 
--- Many-to-many relationship
-CREATE TABLE atom_tags (
-  atom_id TEXT REFERENCES atoms(id) ON DELETE CASCADE,
-  tag_id TEXT REFERENCES tags(id) ON DELETE CASCADE,
-  PRIMARY KEY (atom_id, tag_id)
-);
+## Design System
 
--- Chunked content with embeddings
-CREATE TABLE atom_chunks (
-  id TEXT PRIMARY KEY,
-  atom_id TEXT REFERENCES atoms(id) ON DELETE CASCADE,
-  chunk_index INTEGER NOT NULL,
-  content TEXT NOT NULL,
-  embedding BLOB  -- 384-dimensional float vector from sqlite-lembed
-);
+Dark theme (Obsidian-inspired). Backgrounds: `#1e1e1e`/`#252525`/`#2d2d2d`. Accent: purple (`#7c3aed`). Three-panel layout: fixed-width left panel (tag tree, navigation), flexible main view (canvas/grid/list), overlay right drawer (editor, viewer, wiki, chat).
 
--- Vector similarity search (sqlite-vec virtual table)
-CREATE VIRTUAL TABLE vec_chunks USING vec0(
-  chunk_id TEXT PRIMARY KEY,
-  embedding float[384]
-);
-
--- App settings (key-value store)
-CREATE TABLE settings (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-
--- Wiki articles for tags
-CREATE TABLE wiki_articles (
-  id TEXT PRIMARY KEY,
-  tag_id TEXT UNIQUE REFERENCES tags(id) ON DELETE CASCADE,
-  content TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  atom_count INTEGER NOT NULL
-);
-
--- Citations linking article content to source atoms/chunks
-CREATE TABLE wiki_citations (
-  id TEXT PRIMARY KEY,
-  wiki_article_id TEXT REFERENCES wiki_articles(id) ON DELETE CASCADE,
-  citation_index INTEGER NOT NULL,
-  atom_id TEXT REFERENCES atoms(id) ON DELETE CASCADE,
-  chunk_index INTEGER,
-  excerpt TEXT NOT NULL
-);
-
--- Atom positions for canvas view
-CREATE TABLE atom_positions (
-  atom_id TEXT PRIMARY KEY REFERENCES atoms(id) ON DELETE CASCADE,
-  x REAL NOT NULL,
-  y REAL NOT NULL,
-  updated_at TEXT NOT NULL
-);
-
--- Chat conversations
-CREATE TABLE conversations (
-  id TEXT PRIMARY KEY,
-  title TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  is_archived INTEGER DEFAULT 0
-);
-
--- Many-to-many: conversation tag scope
-CREATE TABLE conversation_tags (
-  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-  tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
-  PRIMARY KEY (conversation_id, tag_id)
-);
-
--- Chat messages
-CREATE TABLE chat_messages (
-  id TEXT PRIMARY KEY,
-  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-  role TEXT NOT NULL,  -- 'user', 'assistant', 'system', 'tool'
-  content TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  message_index INTEGER NOT NULL
-);
-
--- Tool calls for transparency
-CREATE TABLE chat_tool_calls (
-  id TEXT PRIMARY KEY,
-  message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
-  tool_name TEXT NOT NULL,
-  tool_input TEXT NOT NULL,
-  tool_output TEXT,
-  status TEXT NOT NULL DEFAULT 'pending',
-  created_at TEXT NOT NULL,
-  completed_at TEXT
-);
-
--- Chat citations
-CREATE TABLE chat_citations (
-  id TEXT PRIMARY KEY,
-  message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
-  citation_index INTEGER NOT NULL,
-  atom_id TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
-  chunk_index INTEGER,
-  excerpt TEXT NOT NULL,
-  relevance_score REAL
-);
-
--- Semantic edges for graph visualization (pre-computed during embedding)
-CREATE TABLE semantic_edges (
-  id TEXT PRIMARY KEY,
-  source_atom_id TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
-  target_atom_id TEXT NOT NULL REFERENCES atoms(id) ON DELETE CASCADE,
-  similarity_score REAL NOT NULL,
-  source_chunk_index INTEGER,
-  target_chunk_index INTEGER,
-  created_at TEXT NOT NULL,
-  UNIQUE(source_atom_id, target_atom_id)
-);
-
--- Atom cluster assignments for visual grouping
-CREATE TABLE atom_clusters (
-  atom_id TEXT PRIMARY KEY REFERENCES atoms(id) ON DELETE CASCADE,
-  cluster_id INTEGER NOT NULL,
-  computed_at TEXT NOT NULL
-);
-
--- FTS5 virtual table for keyword search
-CREATE VIRTUAL TABLE atom_chunks_fts USING fts5(
-  chunk_id,
-  content,
-  content='atom_chunks',
-  content_rowid='rowid'
-);
-
-```
-
-### Settings Keys
-- `openrouter_api_key`: User's OpenRouter API key for LLM and embedding access
-- `auto_tagging_enabled`: "true" or "false" (default: "true")
-- `embedding_model`: Model for embeddings (default: "openai/text-embedding-3-small")
-  - Supported: `openai/text-embedding-3-small` (1536 dim), `openai/text-embedding-3-large` (3072 dim)
-  - Changing dimension requires re-embedding all atoms (handled automatically)
-- `tagging_model`: Model for tag extraction (default: "openai/gpt-4o-mini")
-  - Supported: `openai/gpt-4o-mini`, `openai/gpt-5-nano`, `openai/gpt-5-mini`, `anthropic/claude-sonnet-4.5`
-- `wiki_model`: Model for wiki generation (default: "anthropic/claude-sonnet-4.5")
-  - Supported: `anthropic/claude-sonnet-4.5`, `openai/gpt-4o-mini`, `openai/gpt-5-nano`
-- `chat_model`: Model for chat (default: "anthropic/claude-sonnet-4.5")
-  - Supported: `anthropic/claude-sonnet-4.5`, `openai/gpt-4o-mini`, `openai/gpt-5-nano`
-
-Note: LLM models are restricted to those supporting structured outputs via OpenRouter.
-
-## Tauri Commands (API)
-
-### Atom Operations
-- `get_all_atoms()` → `Vec<AtomWithTags>`
-- `get_atom(id)` → `AtomWithTags`
-- `create_atom(content, source_url?, tag_ids)` → `AtomWithTags` (triggers async embedding + tag extraction)
-- `update_atom(id, content, source_url?, tag_ids)` → `AtomWithTags` (triggers async embedding + tag extraction)
-- `delete_atom(id)` → `()`
-- `get_atoms_by_tag(tag_id)` → `Vec<AtomWithTags>`
-
-### Tag Operations
-- `get_all_tags()` → `Vec<TagWithCount>` (hierarchical tree)
-- `create_tag(name, parent_id?)` → `Tag`
-- `update_tag(id, name, parent_id?)` → `Tag`
-- `delete_tag(id)` → `()`
-
-### Embedding & Search Operations
-- `find_similar_atoms(atom_id, limit, threshold)` → `Vec<SimilarAtomResult>`
-- `search_atoms_semantic(query, limit, threshold)` → `Vec<SemanticSearchResult>` (vector similarity)
-- `search_atoms_keyword(query, limit)` → `Vec<SemanticSearchResult>` (FTS5/BM25)
-- `search_atoms_hybrid(query, limit, threshold)` → `Vec<SemanticSearchResult>` (combined BM25 + vector)
-- `retry_embedding(atom_id)` → `()` (retriggers embedding for failed atoms)
-- `reset_stuck_processing()` → `i32` (reset atoms stuck in 'processing' state)
-- `process_pending_embeddings()` → `i32` (processes all pending atoms, returns count)
-- `process_pending_tagging()` → `i32` (processes pending tag extraction)
-- `get_embedding_status(atom_id)` → `String`
-
-### Wiki Operations
-- `get_wiki_article(tag_id)` → `Option<WikiArticleWithCitations>` (returns article with citations if exists)
-- `get_wiki_article_status(tag_id)` → `WikiArticleStatus` (quick check: has_article, atom counts, updated_at)
-- `generate_wiki_article(tag_id, tag_name)` → `WikiArticleWithCitations` (generates new article from scratch)
-- `update_wiki_article(tag_id, tag_name)` → `WikiArticleWithCitations` (incrementally updates with new atoms)
-- `delete_wiki_article(tag_id)` → `()` (deletes article and citations)
-
-### Settings Operations
-- `get_settings()` → `HashMap<String, String>` (all settings)
-- `set_setting(key, value)` → `()` (upsert a setting)
-- `test_openrouter_connection(apiKey)` → `Result<bool, String>` (validates API key)
-- `get_available_llm_models()` → `Vec<AvailableModel>` (fetch models supporting structured outputs)
-
-### Canvas Operations
-- `get_atom_positions()` → `Vec<AtomPosition>` (returns all stored canvas positions)
-- `save_atom_positions(positions)` → `()` (bulk save/update positions after simulation)
-- `get_atoms_with_embeddings()` → `Vec<AtomWithEmbedding>` (atoms with average embedding vectors)
-
-### Chat Operations
-- `create_conversation(tag_ids, title?)` → `ConversationWithTags` (creates new conversation with optional tag scope)
-- `get_conversations(filter_tag_id?, limit, offset)` → `Vec<ConversationWithTags>` (list conversations)
-- `get_conversation(id)` → `Option<ConversationWithMessages>` (single conversation with full message history)
-- `update_conversation(id, title?, is_archived?)` → `Conversation` (update metadata)
-- `delete_conversation(id)` → `()` (delete conversation and all messages)
-- `set_conversation_scope(conversation_id, tag_ids)` → `ConversationWithTags` (replace all scope tags)
-- `add_tag_to_scope(conversation_id, tag_id)` → `ConversationWithTags` (add single tag to scope)
-- `remove_tag_from_scope(conversation_id, tag_id)` → `ConversationWithTags` (remove single tag from scope)
-- `send_chat_message(conversation_id, content)` → `ChatMessageWithContext` (send message, triggers agent loop)
-
-### Semantic Graph Operations
-- `get_semantic_edges(min_similarity)` → `Vec<SemanticEdge>` (all edges above threshold)
-- `get_atom_neighborhood(atom_id, depth, min_similarity)` → `NeighborhoodGraph` (local graph view)
-- `rebuild_semantic_edges()` → `i32` (rebuild all edges, for migrations)
-
-### Clustering Operations
-- `compute_clusters(min_similarity?, min_cluster_size?)` → `Vec<AtomCluster>` (compute and cache clusters)
-- `get_clusters()` → `Vec<AtomCluster>` (get cached clusters or compute if missing)
-- `get_connection_counts(min_similarity?)` → `HashMap<String, i32>` (hub identification)
-
-### Ollama Operations
-- `test_ollama(host)` → `bool` (test connection to Ollama server)
-- `get_ollama_models(host)` → `Vec<OllamaModel>` (all models with categorization)
-- `get_ollama_embedding_models_cmd(host)` → `Vec<AvailableModel>` (embedding models only)
-- `get_ollama_llm_models_cmd(host)` → `Vec<AvailableModel>` (LLM models only)
-- `verify_provider_configured()` → `bool` (check if provider has required settings)
-
-### Utility Operations
-- `check_sqlite_vec()` → `String` (version check)
-- `compact_tags()` → `CompactionResult` (LLM-assisted tag categorization and merging)
-
-## Tauri Events
-
-### embedding-complete
-Emitted when an atom's embedding generation completes (success or failure).
-
-Payload:
-```typescript
-{
-  atom_id: string;
-  status: 'complete' | 'failed';
-  error?: string;
-  tags_extracted: string[];      // IDs of all tags applied
-  new_tags_created: string[];    // IDs of newly created tags
-}
-```
-
-### Chat Events
-Events emitted during chat agent loop:
-
-**chat-stream-delta**: Streaming content from assistant
-```typescript
-{ conversation_id: string; content: string; }
-```
-
-**chat-tool-start**: Tool execution started
-```typescript
-{ conversation_id: string; tool_call_id: string; tool_name: string; tool_input: unknown; }
-```
-
-**chat-tool-complete**: Tool execution completed
-```typescript
-{ conversation_id: string; tool_call_id: string; results_count: number; }
-```
-
-**chat-complete**: Full message completed
-```typescript
-{ conversation_id: string; message: ChatMessageWithContext; }
-```
-
-**chat-error**: Error during chat
-```typescript
-{ conversation_id: string; error: string; }
-```
-
-## Wiki Synthesis
-
-### How It Works
-1. User clicks the article icon next to a tag in the left panel
-2. Right drawer opens in wiki mode for that tag
-3. If no article exists, shows empty state with "Generate Article" button
-4. Generation fetches relevant chunks from atoms with that tag
-5. Chunks are ranked by embedding similarity to tag name
-6. Top chunks are sent to OpenRouter LLM with generation prompt
-7. LLM returns markdown article with [N] citations
-8. Citations are extracted and mapped to source atoms/chunks
-9. Article and citations are saved to database
-
-### Incremental Updates
-When new atoms are added after article generation:
-1. Status check shows "X new atoms available" banner
-2. Clicking "Update Article" fetches only new atoms' chunks
-3. Existing article and new sources are sent to LLM with update prompt
-4. LLM integrates new information, continuing citation numbering
-5. Updated article replaces existing content
-
-### Citation Interaction
-- Citations appear as clickable [N] links inline in text
-- Clicking opens a popover positioned near the citation
-- Popover shows excerpt text (~300 chars max)
-- "View full atom →" link opens atom in viewer mode
-- Popover closes on click outside or Escape key
-
-### Structured Outputs
-Wiki generation uses OpenRouter's structured outputs:
-- `response_format.type`: `"json_schema"` with strict validation
-- Schema: `article_content` (string) and `citations_used` (array of integers)
-- Temperature: 0.3 for consistent output
-- Max tokens: 4000 for longer articles
-
-## Automatic Tag Extraction
-
-### How It Works
-1. When an atom is created/updated, the embedding pipeline runs
-2. If auto-tagging is enabled and API key is set, tag extraction runs in parallel with embedding
-3. Each content chunk is sent to OpenRouter using the configured tagging model (default: openai/gpt-4o-mini) with the existing tag hierarchy
-4. The LLM identifies existing tags that apply and suggests new tags if needed
-5. Results from all chunks are merged and deduplicated
-6. Existing tags are linked to the atom; new tags are created with proper hierarchy
-7. The `embedding-complete` event includes tag information for UI updates
-
-### Configurable Model
-The tagging model can be configured in Settings:
-- Default: `openai/gpt-4o-mini` (cheaper/faster, good for bulk imports)
-- Alternative: `anthropic/claude-sonnet-4.5` (higher quality, more expensive)
-- Any OpenRouter model ID that supports structured outputs can be used
-
-### Structured Outputs
-The tag extraction uses OpenRouter's structured outputs feature to guarantee valid JSON responses:
-- `response_format.type`: `"json_schema"` with strict schema validation
-- `provider.require_parameters`: `true` to ensure the provider supports structured outputs
-- Schema enforces the exact structure: `existing_tag_ids` (array of strings) and `new_tags` (array of objects with name, parent_id, suggested_category)
-
-### Tag Categories
-New tags are automatically placed under category tags:
-- **Locations**: Geographic places
-- **People**: Named individuals
-- **Organizations**: Companies, institutions, groups
-- **Topics**: Subject matter, concepts
-- **Events**: Historical or current events
-- **Other**: Miscellaneous
-
-### Error Handling
-- API errors are retried up to 3 times with exponential backoff
-- Extraction failures don't break the embedding pipeline
-- Missing API key or disabled auto-tagging gracefully skips extraction
-
-## Canvas View
-
-### Architecture
-The canvas view provides a spatial visualization of atoms using:
-- **react-zoom-pan-pinch**: Handles zoom/pan interactions via TransformWrapper and TransformComponent
-- **d3-force**: Calculates atom positions using force simulation (no D3 rendering)
-- **React components**: Renders atom cards and SVG connection lines
-
-### Force Simulation
-The simulation uses multiple forces to position atoms:
-- `forceManyBody()`: Repulsion between atoms (strength: -200)
-- `forceCollide()`: Collision detection (radius: 100px)
-- `forceLink()`: Attraction between atoms sharing tags
-- `forceCenter()`: Centers graph at (2500, 2500) on 5000x5000 canvas
-- Custom `similarityForce`: Attraction based on embedding cosine similarity (threshold: 0.7)
-
-### Position Persistence
-- Positions are saved to `atom_positions` table after simulation completes
-- On subsequent loads, stored positions are used (no re-simulation)
-- New atoms trigger incremental simulation with existing atoms fixed initially
-
-### Visual Design
-- **Atom nodes**: 160px wide compact cards with truncated content
-- **Connection lines**: SVG lines between atoms sharing tags (opacity: 0.15)
-- **Fading**: Non-matching atoms fade to 20% opacity when filtering by tag or search
-- **Canvas controls**: Zoom in/out/reset buttons in bottom-right corner
-
-### Components
-- `CanvasView`: Main container, handles data loading and simulation orchestration
-- `CanvasContent`: Inner content layer that gets transformed by zoom/pan
-- `AtomNode`: Compact card component for individual atoms (memoized)
-- `ConnectionLines`: SVG layer rendering lines between connected atoms
-- `CanvasControls`: Zoom control buttons using react-zoom-pan-pinch hooks
-- `useForceSimulation`: Custom hook managing D3 force simulation
-
-## Chunking Algorithm
-
-Content is chunked using a markdown-aware, overlapping strategy optimized for RAG:
-1. Parse markdown structure (code blocks, headers, lists, paragraphs)
-2. Never split code blocks (kept atomic even if exceeding max size)
-3. Headers create natural chunk boundaries
-4. Split at paragraph boundaries, then sentence boundaries if needed
-5. Target chunk size: 2500 tokens (~10,000 chars)
-6. Overlap: 200 tokens from next chunk appended to each chunk
-7. Minimum chunk: 100 tokens (smaller merged with adjacent)
-8. Maximum chunk: 3000 tokens (hard limit, except code blocks)
-9. Token counting via tiktoken (cl100k_base encoding, matches OpenAI models)
-
-## Key Dependencies
-
-### Rust (Cargo.toml)
-- `tauri` = "2"
-- `tauri-plugin-opener` = "2"
-- `rusqlite` = { version = "0.32", features = ["bundled", "load_extension"] }
-- `sqlite-vec` = "0.1.6"
-- `serde` = { version = "1", features = ["derive"] }
-- `serde_json` = "1"
-- `uuid` = { version = "1", features = ["v4"] }
-- `chrono` = { version = "0.4", features = ["serde"] }
-- `zerocopy` = { version = "0.8", features = ["derive"] }
-- `tokio` = { version = "1", features = ["full"] }
-- `reqwest` = { version = "0.12", features = ["json"] }
-- `regex` = "1"
-- `tiktoken-rs` = "0.6"
-
-### Frontend (package.json)
-- `@tauri-apps/api` = "^2.0.0"
-- `react` = "^18.3.1"
-- `zustand` = "^5.0.0"
-- `@uiw/react-codemirror` = "^4.25.3"
-- `@codemirror/lang-markdown` = "^6.5.0"
-- `@codemirror/theme-one-dark` = "^6.1.3"
-- `react-markdown` = "^10.1.0"
-- `remark-gfm` = "^4.0.1"
-- `tailwindcss` = "^4.0.0"
-- `@tailwindcss/vite` = "^4.0.0"
-- `@tailwindcss/typography` = "^0.5.19"
-- `d3-force` = "^3.0.0"
-- `react-zoom-pan-pinch` = "^3.0.0"
-- `@types/d3-force` = "^3.0.0" (dev)
-- `better-sqlite3` = "^11.5.0" (dev, for import scripts)
-
-## Design System (Dark Theme - Obsidian-inspired)
-
-### Colors
-- Background: `#1e1e1e` (main), `#252525` (panels), `#2d2d2d` (cards/elevated)
-- Text: `#dcddde` (primary), `#888888` (secondary/muted), `#666666` (tertiary)
-- Borders: `#3d3d3d`
-- Accent: `#7c3aed` (purple), `#a78bfa` (light purple for tags)
-- Status: `amber-500` (pending/processing), `red-500` (failed), `green-500` (success)
-
-### Layout
-- Left Panel: 250px fixed width
-- Main View: Flexible, fills remaining space
-- Right Drawer: 75vw width, slides from right as overlay
-
-### Tag Display
-- Tags are collapsed by default in AtomViewer and TagSelector
-- Maximum 5 tags shown initially
-- "+N more" button expands to show all tags
-- "Show less" button collapses back to 5 tags
-
-### Animations
-- Drawer slide: 200ms ease-out
-- Modal fade/zoom: 200ms
-- Hover transitions: 150ms
-- Embedding status pulse: CSS `animate-pulse`
-
-## State Management (Zustand Stores)
-
-### atoms.ts
-- `atoms: AtomWithTags[]` - All loaded atoms
-- `isLoading: boolean` - Loading state
-- `error: string | null` - Error message
-- `semanticSearchQuery: string` - Current semantic search query
-- `semanticSearchResults: SemanticSearchResult[] | null` - Search results (null = not searching)
-- `isSearching: boolean` - Semantic search loading state
-- Actions: `fetchAtoms`, `fetchAtomsByTag`, `createAtom`, `updateAtom`, `deleteAtom`, `updateAtomStatus`, `searchSemantic`, `clearSemanticSearch`, `retryEmbedding`
-
-### tags.ts
-- `tags: TagWithCount[]` - Hierarchical tag tree
-- `isLoading: boolean`
-- `error: string | null`
-- Actions: `fetchTags`, `createTag`, `updateTag`, `deleteTag`
-
-### ui.ts
-- `selectedTagId: string | null` - Currently selected tag filter
-- `drawerState: { isOpen, mode, atomId, tagId, tagName, conversationId }` - Drawer state
-- `viewMode: 'canvas' | 'grid' | 'list'` - Atom display mode (default: 'canvas', persisted to localStorage)
-- `searchQuery: string` - Text search filter
-- Drawer modes: `'editor' | 'viewer' | 'wiki' | 'chat'`
-- Actions: `setSelectedTag`, `openDrawer`, `openWikiDrawer`, `openChatDrawer`, `closeDrawer`, `setViewMode`, `setSearchQuery`
-
-### settings.ts
-- `settings: Record<string, string>` - All settings as key-value pairs
-- `isLoading: boolean`
-- `error: string | null`
-- Actions: `fetchSettings`, `setSetting`, `testOpenRouterConnection`
-
-### wiki.ts
-- `currentArticle: WikiArticleWithCitations | null` - Current wiki article
-- `articleStatus: WikiArticleStatus | null` - Article status info
-- `isLoading: boolean` - Loading state
-- `isGenerating: boolean` - Generation in progress
-- `isUpdating: boolean` - Update in progress
-- `error: string | null` - Error message
-- Actions: `fetchArticle`, `fetchArticleStatus`, `generateArticle`, `updateArticle`, `deleteArticle`, `clearArticle`, `clearError`
-
-### chat.ts
-- `view: 'list' | 'conversation'` - Current chat view
-- `currentConversation: ConversationWithTags | null` - Active conversation
-- `messages: ChatMessageWithContext[]` - Messages in current conversation
-- `conversations: ConversationWithTags[]` - List of all conversations
-- `listFilterTagId: string | null` - Filter for conversations list
-- `isLoading: boolean` - Loading state
-- `isStreaming: boolean` - Streaming response in progress
-- `streamingContent: string` - Content being streamed
-- `retrievalSteps: RetrievalStep[]` - Tool calls for transparency
-- `error: string | null` - Error message
-- Actions: `showList`, `openConversation`, `goBack`, `fetchConversations`, `createConversation`, `deleteConversation`, `updateConversationTitle`, `setScope`, `addTagToScope`, `removeTagFromScope`, `sendMessage`, `cancelResponse`, `appendStreamContent`, `addRetrievalStep`, `completeMessage`, `setStreamingError`, `clearError`, `reset`
-
-### Similarity Calculation
-- sqlite-vec returns Euclidean distance (lower = more similar)
-- For normalized vectors, convert to similarity: `1.0 - (distance / 2.0)`
-- Default threshold: 0.7 for related atoms, 0.3 for semantic search, 0.3 for wiki chunk selection
+Frontend state is managed by Zustand stores: `atoms`, `tags`, `ui`, `settings`, `wiki`, `chat`. The `ui` store tracks selected tag filter, drawer state, view mode, and search query. View mode (canvas/grid/list) persists to localStorage.

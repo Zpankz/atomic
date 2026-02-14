@@ -9,7 +9,9 @@ import { useAtomsStore } from '../../stores/atoms';
 import { useTagsStore } from '../../stores/tags';
 import { useUIStore } from '../../stores/ui';
 import { useTheme } from '../../hooks';
-import { resetStuckProcessing, processPendingEmbeddings, processPendingTagging, verifyProviderConfigured } from '../../lib/tauri';
+import { verifyProviderConfigured } from '../../lib/api';
+import { isTauri } from '../../lib/platform';
+
 
 export function Layout() {
   useTheme(); // Initialize theme
@@ -78,6 +80,13 @@ export function Layout() {
     return () => window.removeEventListener('open-settings', handleOpenSettings);
   }, []);
 
+  // Listen for auth expiry (stale/revoked token) and transition to setup mode
+  useEffect(() => {
+    const handler = () => setIsSetupRequired(true);
+    window.addEventListener('atomic:auth-expired', handler);
+    return () => window.removeEventListener('atomic:auth-expired', handler);
+  }, []);
+
   // Check if setup is needed on mount
   useEffect(() => {
     const checkSetup = async () => {
@@ -100,48 +109,7 @@ export function Layout() {
   }, []);
 
   const initializeApp = async () => {
-    // Fetch initial data first
     await Promise.all([fetchAtoms(), fetchTags()]);
-
-    // Reset any atoms stuck in 'processing' from interrupted sessions
-    try {
-      const resetCount = await resetStuckProcessing();
-      if (resetCount > 0) {
-        console.log(`Reset ${resetCount} atoms stuck in processing state`);
-      }
-    } catch (error) {
-      console.error('Failed to reset stuck processing:', error);
-    }
-
-    // Phase 1: Process any pending embeddings in the background (fast)
-    try {
-      const embeddingCount = await processPendingEmbeddings();
-      if (embeddingCount > 0) {
-        console.log(`Processing ${embeddingCount} pending embeddings in background...`);
-      }
-    } catch (error) {
-      console.error('Failed to start pending embeddings:', error);
-      // Don't block app startup on embedding failure
-    }
-
-    // Phase 2: Process any pending tagging in the background (slower, after embeddings)
-    try {
-      const taggingCount = await processPendingTagging();
-      if (taggingCount > 0) {
-        console.log(`Processing ${taggingCount} pending tagging operations in background...`);
-        console.log(`Tag extraction uses LLM API (may be rate-limited).`);
-
-        if (taggingCount > 100) {
-          console.warn(
-            `Large batch detected. Processing ${taggingCount} atoms for tagging may take 10-30 minutes. ` +
-            `Watch for atoms to update as processing completes.`
-          );
-        }
-      }
-    } catch (error) {
-      console.error('Failed to start pending tagging:', error);
-      // Don't block app startup on tagging failure
-    }
   };
 
   const handleSetupComplete = async () => {
@@ -153,7 +121,7 @@ export function Layout() {
   // Show loading while checking
   if (isSetupRequired === null) {
     return (
-      <div className="flex h-screen items-center justify-center bg-[var(--color-bg-main)] pt-[28px]">
+      <div className={`flex h-screen items-center justify-center bg-[var(--color-bg-main)] ${isTauri() ? 'pt-[28px]' : ''}`}>
         <span className="text-[var(--color-text-secondary)]">Loading...</span>
       </div>
     );
@@ -162,7 +130,7 @@ export function Layout() {
   // Show setup modal if required
   if (isSetupRequired) {
     return (
-      <div className="flex h-screen overflow-hidden bg-[var(--color-bg-main)] pt-[28px]">
+      <div className={`flex h-screen overflow-hidden bg-[var(--color-bg-main)] ${isTauri() ? 'pt-[28px]' : ''}`}>
         <SettingsModal
           isOpen={true}
           onClose={handleSetupComplete}

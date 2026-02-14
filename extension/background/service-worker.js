@@ -1,4 +1,5 @@
-const SERVER_URL = 'http://localhost:44380';
+import { getConfig, authHeaders } from '../lib/config.js';
+
 const QUEUE_KEY = 'captureQueue';
 
 // Add context menu on install
@@ -69,9 +70,10 @@ async function captureContent(tabId, mode) {
 
 // Send to desktop app via HTTP
 async function sendToDesktop(capture) {
-  const response = await fetch(`${SERVER_URL}/atoms`, {
+  const { serverUrl, apiToken } = await getConfig();
+  const response = await fetch(`${serverUrl}/api/atoms`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders(apiToken),
     body: JSON.stringify({
       content: capture.content,
       source_url: capture.url,
@@ -106,14 +108,17 @@ async function getQueue() {
 
 // Check connection and sync queue
 async function syncQueue() {
+  const { serverUrl, apiToken } = await getConfig();
   try {
     // Health check
-    const response = await fetch(`${SERVER_URL}/health`);
+    const response = await fetch(`${serverUrl}/health`, {
+      headers: authHeaders(apiToken)
+    });
     if (!response.ok) throw new Error('Unhealthy');
 
     // Connected - update badge
     chrome.action.setBadgeBackgroundColor({ color: '#22c55e' });
-    chrome.action.setBadgeText({ text: '●' });
+    chrome.action.setBadgeText({ text: '\u25CF' });
 
     // Sync queue
     const queue = await getQueue();
@@ -142,7 +147,7 @@ async function syncQueue() {
   } catch (error) {
     // Offline - gray badge
     chrome.action.setBadgeBackgroundColor({ color: '#9ca3af' });
-    chrome.action.setBadgeText({ text: '●' });
+    chrome.action.setBadgeText({ text: '\u25CF' });
   }
 }
 
@@ -154,13 +159,16 @@ async function updateBadge() {
     chrome.action.setBadgeBackgroundColor({ color: '#f59e0b' });
   } else {
     // Clear badge when queue is empty, show connection status dot
-    const response = await fetch(`${SERVER_URL}/health`).catch(() => null);
+    const { serverUrl, apiToken } = await getConfig();
+    const response = await fetch(`${serverUrl}/health`, {
+      headers: authHeaders(apiToken)
+    }).catch(() => null);
     if (response && response.ok) {
       chrome.action.setBadgeBackgroundColor({ color: '#22c55e' });
-      chrome.action.setBadgeText({ text: '●' });
+      chrome.action.setBadgeText({ text: '\u25CF' });
     } else {
       chrome.action.setBadgeBackgroundColor({ color: '#9ca3af' });
-      chrome.action.setBadgeText({ text: '●' });
+      chrome.action.setBadgeText({ text: '\u25CF' });
     }
   }
 }

@@ -40,6 +40,28 @@ pub struct TagWithCount {
     pub children: Vec<TagWithCount>,
 }
 
+/// Lightweight atom summary for paginated list views (no full content)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AtomSummary {
+    pub id: String,
+    pub snippet: String,
+    pub source_url: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub embedding_status: String,
+    pub tagging_status: String,
+    pub tags: Vec<Tag>,
+}
+
+/// Paginated response for atom list
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaginatedAtoms {
+    pub atoms: Vec<AtomSummary>,
+    pub total_count: i32,
+    pub limit: i32,
+    pub offset: i32,
+}
+
 /// Result struct for similar atom search
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimilarAtomResult {

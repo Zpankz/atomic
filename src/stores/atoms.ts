@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { invoke } from '@tauri-apps/api/core';
+import { getTransport } from '../lib/transport';
 
 export interface Atom {
   id: string;
@@ -20,6 +20,24 @@ export interface Tag {
 
 export interface AtomWithTags extends Atom {
   tags: Tag[];
+}
+
+export interface AtomSummary {
+  id: string;
+  snippet: string;
+  source_url: string | null;
+  created_at: string;
+  updated_at: string;
+  embedding_status: 'pending' | 'processing' | 'complete' | 'failed';
+  tagging_status: 'pending' | 'processing' | 'complete' | 'failed' | 'skipped';
+  tags: Tag[];
+}
+
+export interface PaginatedAtoms {
+  atoms: AtomSummary[];
+  total_count: number;
+  limit: number;
+  offset: number;
 }
 
 export interface SemanticSearchResult {
@@ -52,8 +70,17 @@ export interface SimilarAtomResult {
 
 export type SearchMode = 'keyword' | 'semantic' | 'hybrid';
 
+// Union type for atoms displayed in grid/list — either summary or search result
+export type DisplayAtom = AtomSummary | SemanticSearchResult;
+
+const PAGE_SIZE = 50;
+
 interface AtomsStore {
-  atoms: AtomWithTags[];
+  atoms: AtomSummary[];
+  totalCount: number;
+  currentOffset: number;
+  hasMore: boolean;
+  currentTagFilter: string | null;
   isLoading: boolean;
   error: string | null;
 
@@ -62,15 +89,16 @@ interface AtomsStore {
   semanticSearchQuery: string;
   semanticSearchResults: SemanticSearchResult[] | null;  // null = not searching
   isSearching: boolean;
-  
+
   // Existing methods
   fetchAtoms: () => Promise<void>;
   fetchAtomsByTag: (tagId: string) => Promise<void>;
+  fetchNextPage: () => Promise<void>;
   createAtom: (content: string, sourceUrl?: string, tagIds?: string[]) => Promise<AtomWithTags>;
   updateAtom: (id: string, content: string, sourceUrl?: string, tagIds?: string[]) => Promise<AtomWithTags>;
   deleteAtom: (id: string) => Promise<void>;
   clearError: () => void;
-  
+
   // New methods
   updateAtomStatus: (atomId: string, status: string) => void;
   batchUpdateAtomStatuses: (updates: Array<{atomId: string, status: string}>) => void;
@@ -82,8 +110,30 @@ interface AtomsStore {
   retryEmbedding: (atomId: string) => Promise<void>;
 }
 
+/** Convert an AtomWithTags (full content) to AtomSummary shape for the store */
+function toSummary(atom: AtomWithTags): AtomSummary {
+  // Extract first ~200 chars as snippet, stripping basic markdown
+  const lines = atom.content.split('\n').filter(l => l.trim());
+  const plain = lines.map(l => l.replace(/^#{1,6}\s/, '').replace(/\*\*/g, '')).join(' ');
+  const snippet = plain.length > 200 ? plain.slice(0, 200).trim() + '...' : plain;
+  return {
+    id: atom.id,
+    snippet,
+    source_url: atom.source_url,
+    created_at: atom.created_at,
+    updated_at: atom.updated_at,
+    embedding_status: atom.embedding_status,
+    tagging_status: atom.tagging_status,
+    tags: atom.tags,
+  };
+}
+
 export const useAtomsStore = create<AtomsStore>((set, get) => ({
   atoms: [],
+  totalCount: 0,
+  currentOffset: 0,
+  hasMore: true,
+  currentTagFilter: null,
   isLoading: false,
   error: null,
 
@@ -94,20 +144,67 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
   isSearching: false,
 
   fetchAtoms: async () => {
-    set({ isLoading: true, error: null });
+    set({ isLoading: true, error: null, currentTagFilter: null, currentOffset: 0 });
     try {
-      const atoms = await invoke<AtomWithTags[]>('get_all_atoms');
-      set({ atoms, isLoading: false });
+      const result = await getTransport().invoke<PaginatedAtoms>('list_atoms', {
+        limit: PAGE_SIZE,
+        offset: 0,
+      });
+      set({
+        atoms: result.atoms,
+        totalCount: result.total_count,
+        currentOffset: result.atoms.length,
+        hasMore: result.atoms.length < result.total_count,
+        isLoading: false,
+      });
     } catch (error) {
       set({ error: String(error), isLoading: false });
     }
   },
 
   fetchAtomsByTag: async (tagId: string) => {
-    set({ isLoading: true, error: null });
+    set({ isLoading: true, error: null, currentTagFilter: tagId, currentOffset: 0 });
     try {
-      const atoms = await invoke<AtomWithTags[]>('get_atoms_by_tag', { tagId });
-      set({ atoms, isLoading: false });
+      const result = await getTransport().invoke<PaginatedAtoms>('list_atoms', {
+        tagId,
+        limit: PAGE_SIZE,
+        offset: 0,
+      });
+      set({
+        atoms: result.atoms,
+        totalCount: result.total_count,
+        currentOffset: result.atoms.length,
+        hasMore: result.atoms.length < result.total_count,
+        isLoading: false,
+      });
+    } catch (error) {
+      set({ error: String(error), isLoading: false });
+    }
+  },
+
+  fetchNextPage: async () => {
+    const { currentOffset, hasMore, isLoading, currentTagFilter } = get();
+    if (!hasMore || isLoading) return;
+
+    set({ isLoading: true });
+    try {
+      const args: Record<string, unknown> = {
+        limit: PAGE_SIZE,
+        offset: currentOffset,
+      };
+      if (currentTagFilter) args.tagId = currentTagFilter;
+
+      const result = await getTransport().invoke<PaginatedAtoms>('list_atoms', args);
+      set((state) => {
+        const newAtoms = [...state.atoms, ...result.atoms];
+        return {
+          atoms: newAtoms,
+          totalCount: result.total_count,
+          currentOffset: newAtoms.length,
+          hasMore: newAtoms.length < result.total_count,
+          isLoading: false,
+        };
+      });
     } catch (error) {
       set({ error: String(error), isLoading: false });
     }
@@ -116,12 +213,16 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
   createAtom: async (content: string, sourceUrl?: string, tagIds?: string[]) => {
     set({ error: null });
     try {
-      const atom = await invoke<AtomWithTags>('create_atom', {
+      const atom = await getTransport().invoke<AtomWithTags>('create_atom', {
         content,
         sourceUrl: sourceUrl || null,
         tagIds: tagIds || [],
       });
-      set((state) => ({ atoms: [atom, ...state.atoms] }));
+      // Prepend summary to list and bump total count
+      set((state) => ({
+        atoms: [toSummary(atom), ...state.atoms],
+        totalCount: state.totalCount + 1,
+      }));
       return atom;
     } catch (error) {
       set({ error: String(error) });
@@ -132,14 +233,15 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
   updateAtom: async (id: string, content: string, sourceUrl?: string, tagIds?: string[]) => {
     set({ error: null });
     try {
-      const atom = await invoke<AtomWithTags>('update_atom', {
+      const atom = await getTransport().invoke<AtomWithTags>('update_atom', {
         id,
         content,
         sourceUrl: sourceUrl || null,
         tagIds: tagIds || [],
       });
+      const summary = toSummary(atom);
       set((state) => ({
-        atoms: state.atoms.map((a) => (a.id === id ? atom : a)),
+        atoms: state.atoms.map((a) => (a.id === id ? summary : a)),
       }));
       return atom;
     } catch (error) {
@@ -151,9 +253,10 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
   deleteAtom: async (id: string) => {
     set({ error: null });
     try {
-      await invoke('delete_atom', { id });
+      await getTransport().invoke('delete_atom', { id });
       set((state) => ({
         atoms: state.atoms.filter((a) => a.id !== id),
+        totalCount: Math.max(0, state.totalCount - 1),
       }));
     } catch (error) {
       set({ error: String(error) });
@@ -162,13 +265,13 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
   },
 
   clearError: () => set({ error: null }),
-  
+
   // New methods
   updateAtomStatus: (atomId: string, status: string) => {
     set((state) => ({
       atoms: state.atoms.map((a) =>
         a.id === atomId
-          ? { ...a, embedding_status: status as Atom['embedding_status'] }
+          ? { ...a, embedding_status: status as AtomSummary['embedding_status'] }
           : a
       ),
     }));
@@ -181,19 +284,23 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
       atoms: state.atoms.map((a) => {
         const newStatus = updateMap.get(a.id);
         return newStatus
-          ? { ...a, embedding_status: newStatus as Atom['embedding_status'] }
+          ? { ...a, embedding_status: newStatus as AtomSummary['embedding_status'] }
           : a;
       }),
     }));
   },
 
   addAtom: (atom: AtomWithTags) => {
-    set((state) => ({
-      // Add to beginning of list (most recent first)
-      atoms: [atom, ...state.atoms],
-    }));
+    set((state) => {
+      // Skip if atom already exists (e.g., same-session create already added it)
+      if (state.atoms.some(a => a.id === atom.id)) return state;
+      return {
+        atoms: [toSummary(atom), ...state.atoms],
+        totalCount: state.totalCount + 1,
+      };
+    });
   },
-  
+
   search: async (query: string) => {
     const { searchMode } = get();
     set({ isSearching: true, error: null, semanticSearchQuery: query });
@@ -202,13 +309,13 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
 
       switch (searchMode) {
         case 'keyword':
-          results = await invoke<SemanticSearchResult[]>('search_atoms_keyword', {
+          results = await getTransport().invoke<SemanticSearchResult[]>('search_atoms_keyword', {
             query,
             limit: 20,
           });
           break;
         case 'semantic':
-          results = await invoke<SemanticSearchResult[]>('search_atoms_semantic', {
+          results = await getTransport().invoke<SemanticSearchResult[]>('search_atoms_semantic', {
             query,
             limit: 20,
             threshold: 0.4,
@@ -216,7 +323,7 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
           break;
         case 'hybrid':
         default:
-          results = await invoke<SemanticSearchResult[]>('search_atoms_hybrid', {
+          results = await getTransport().invoke<SemanticSearchResult[]>('search_atoms_hybrid', {
             query,
             limit: 20,
             threshold: 0.4,
@@ -244,11 +351,11 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
   setSearchMode: (mode: SearchMode) => {
     set({ searchMode: mode });
   },
-  
+
   retryEmbedding: async (atomId: string) => {
     set({ error: null });
     try {
-      await invoke('retry_embedding', { atomId });
+      await getTransport().invoke('retry_embedding', { atomId });
       // Update the atom status to 'pending' optimistically
       set((state) => ({
         atoms: state.atoms.map((a) =>
@@ -261,4 +368,3 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
     }
   },
 }));
-

@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import * as d3 from 'd3-force';
-import { AtomWithTags } from '../../stores/atoms';
+import { AtomSummary } from '../../stores/atoms';
 import { Connection } from './ConnectionLines';
 
 export interface SimulationNode extends d3.SimulationNodeDatum {
   id: string;
-  atom: AtomWithTags;
+  atom: AtomSummary;
   x: number;
   y: number;
 }
@@ -17,7 +17,7 @@ interface SimulationLink extends d3.SimulationLinkDatum<SimulationNode> {
 }
 
 interface UseForceSimulationProps {
-  atoms: AtomWithTags[];
+  atoms: AtomSummary[];
   embeddings: Map<string, number[]>;
   existingPositions: Map<string, { x: number; y: number }>;
   connections: Connection[];
@@ -187,7 +187,7 @@ export function useForceSimulation({
 
 // Helper to build connections from atoms using an inverted index.
 // Previous O(n^2) nested loop replaced with tag-based grouping.
-export function buildConnections(atoms: AtomWithTags[]): Connection[] {
+export function buildConnections(atoms: AtomSummary[]): Connection[] {
   // Build inverted index: tagId -> list of atom indices
   const tagToAtoms = new Map<string, number[]>();
   for (let i = 0; i < atoms.length; i++) {

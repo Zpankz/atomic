@@ -1,25 +1,10 @@
-mod agent;
-mod chat;
-mod chunking;
-mod clustering;
 mod commands;
-mod compaction;
-mod db;
-mod embedding;
-mod extraction;
+mod event_bridge;
 mod http_server;
 mod mcp;
 mod models;
-mod obsidian;
-mod providers;
-mod search;
-mod settings;
-mod wiki;
 
-use db::{Database, SharedDatabase};
-use std::sync::Arc;
 use tauri::Manager;
-use tauri::path::BaseDirectory;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -33,33 +18,30 @@ pub fn run() {
                 .app_data_dir()
                 .expect("Failed to get app data directory");
 
-            // Get the resource directory where model and extension are bundled
-            let resource_dir = app
-                .path()
-                .resolve("resources", BaseDirectory::Resource)
-                .expect("Failed to resolve resource directory");
+            std::fs::create_dir_all(&app_data_dir)
+                .expect("Failed to create app data directory");
 
-            let database = Database::new(app_data_dir.clone(), resource_dir.clone())
-                .expect("Failed to initialize database");
+            let db_name = std::env::var("ATOMIC_DB_NAME")
+                .map(|name| format!("{}.db", name))
+                .unwrap_or_else(|_| "atomic.db".to_string());
 
-            // Create a shared database reference for embedding tasks
-            // This creates a new connection to the same database file
-            let shared_db: SharedDatabase = Arc::new(
-                database
-                    .with_new_connection()
-                    .expect("Failed to create shared database connection"),
-            );
+            let db_path = app_data_dir.join(&db_name);
+            eprintln!("Using database: {:?}", db_path);
 
-            app.manage(database);
-            app.manage(shared_db.clone());
+            let core = atomic_core::AtomicCore::open_or_create(&db_path)
+                .expect("Failed to initialize AtomicCore");
+
+            app.manage(core.clone());
 
             // Start HTTP server in background for browser extension
-            let server_shared_db = shared_db.clone();
+            let server_core = core;
             let server_app_handle = app.handle().clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
                 rt.block_on(async move {
-                    if let Err(e) = http_server::start_server(server_shared_db, server_app_handle).await {
+                    if let Err(e) =
+                        http_server::start_server(server_core, server_app_handle).await
+                    {
                         eprintln!("HTTP server error: {}", e);
                     }
                 });
@@ -73,6 +55,7 @@ pub fn run() {
             commands::create_atom,
             commands::update_atom,
             commands::delete_atom,
+            commands::list_atoms,
             commands::get_all_tags,
             commands::create_tag,
             commands::update_tag,
@@ -117,16 +100,16 @@ pub fn run() {
             // Setup command
             commands::verify_provider_configured,
             // Chat commands
-            chat::create_conversation,
-            chat::get_conversations,
-            chat::get_conversation,
-            chat::update_conversation,
-            chat::delete_conversation,
-            chat::set_conversation_scope,
-            chat::add_tag_to_scope,
-            chat::remove_tag_from_scope,
+            commands::create_conversation,
+            commands::get_conversations,
+            commands::get_conversation,
+            commands::update_conversation,
+            commands::delete_conversation,
+            commands::set_conversation_scope,
+            commands::add_tag_to_scope,
+            commands::remove_tag_from_scope,
             // Agent/messaging
-            agent::send_chat_message,
+            commands::send_chat_message,
             // Tag compaction
             commands::compact_tags,
             // Import commands
@@ -138,4 +121,3 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-

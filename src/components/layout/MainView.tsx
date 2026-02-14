@@ -1,4 +1,4 @@
-import { useMemo, useCallback, useDeferredValue } from 'react';
+import { useMemo, useCallback, useEffect, useRef } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { AtomGrid } from '../atoms/AtomGrid';
 import { AtomList } from '../atoms/AtomList';
@@ -9,9 +9,14 @@ import { useUIStore } from '../../stores/ui';
 
 export function MainView() {
   const atoms = useAtomsStore(s => s.atoms);
+  const totalCount = useAtomsStore(s => s.totalCount);
+  const hasMore = useAtomsStore(s => s.hasMore);
+  const fetchNextPage = useAtomsStore(s => s.fetchNextPage);
   const semanticSearchResults = useAtomsStore(s => s.semanticSearchResults);
   const semanticSearchQuery = useAtomsStore(s => s.semanticSearchQuery);
   const retryEmbedding = useAtomsStore(s => s.retryEmbedding);
+  const search = useAtomsStore(s => s.search);
+  const clearSemanticSearch = useAtomsStore(s => s.clearSemanticSearch);
 
   const { viewMode, searchQuery, selectedTagId, highlightedAtomId } = useUIStore(
     useShallow(s => ({
@@ -28,8 +33,29 @@ export function MainView() {
   const openCommandPalette = useUIStore(s => s.openCommandPalette);
   const setHighlightedAtom = useUIStore(s => s.setHighlightedAtom);
 
-  // Defer search query to keep input responsive while filtering 30k atoms
-  const deferredSearchQuery = useDeferredValue(searchQuery);
+  // Debounced server-side search when searchQuery changes
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  useEffect(() => {
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+
+    const query = searchQuery.trim();
+    if (!query) {
+      // Clear search results when query is empty
+      if (semanticSearchResults !== null) {
+        clearSemanticSearch();
+      }
+      return;
+    }
+
+    // Debounce 300ms before triggering API search
+    searchTimerRef.current = setTimeout(() => {
+      search(query);
+    }, 300);
+
+    return () => {
+      if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    };
+  }, [searchQuery]);
 
   // Determine what to display
   const displayAtoms = useMemo(() => {
@@ -37,16 +63,8 @@ export function MainView() {
     if (semanticSearchResults !== null) {
       return semanticSearchResults;
     }
-
-    // Otherwise, filter by text search
-    if (!deferredSearchQuery.trim()) return atoms;
-    const query = deferredSearchQuery.toLowerCase();
-    return atoms.filter(
-      (atom) =>
-        atom.content.toLowerCase().includes(query) ||
-        atom.tags.some((tag) => tag.name.toLowerCase().includes(query))
-    );
-  }, [atoms, deferredSearchQuery, semanticSearchResults]);
+    return atoms;
+  }, [atoms, semanticSearchResults]);
 
   // Check if we're showing semantic search results
   const isSemanticSearch = semanticSearchResults !== null;
@@ -121,6 +139,15 @@ export function MainView() {
   const handleHighlightClear = useCallback(() => {
     setHighlightedAtom(null);
   }, [setHighlightedAtom]);
+
+  const handleLoadMore = useCallback(() => {
+    if (!isSemanticSearch && hasMore) {
+      fetchNextPage();
+    }
+  }, [isSemanticSearch, hasMore, fetchNextPage]);
+
+  // Display count: totalCount from server when not searching, results length when searching
+  const displayCount = isSemanticSearch ? displayAtoms.length : totalCount;
 
   return (
     <main className="flex-1 flex flex-col h-full bg-[var(--color-bg-main)] overflow-hidden">
@@ -221,7 +248,7 @@ export function MainView() {
 
         {/* Atom count */}
         <span className="text-sm text-[var(--color-text-secondary)] shrink-0">
-          {displayAtoms.length} atom{displayAtoms.length !== 1 ? 's' : ''}
+          {displayCount} atom{displayCount !== 1 ? 's' : ''}
         </span>
       </div>
 
@@ -255,6 +282,7 @@ export function MainView() {
             onAtomClick={handleAtomClick}
             getMatchingChunkContent={isSemanticSearch ? getMatchingChunkContent : undefined}
             onRetryEmbedding={handleRetryEmbedding}
+            onLoadMore={handleLoadMore}
           />
         ) : (
           <AtomList
@@ -262,6 +290,7 @@ export function MainView() {
             onAtomClick={handleAtomClick}
             getMatchingChunkContent={isSemanticSearch ? getMatchingChunkContent : undefined}
             onRetryEmbedding={handleRetryEmbedding}
+            onLoadMore={handleLoadMore}
           />
         )}
       </div>
@@ -271,4 +300,3 @@ export function MainView() {
     </main>
   );
 }
-

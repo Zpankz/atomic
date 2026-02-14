@@ -1,8 +1,8 @@
 import { memo, useMemo } from 'react';
-import { AtomWithTags } from '../../stores/atoms';
+import { AtomSummary } from '../../stores/atoms';
 
 interface AtomNodeProps {
-  atom: AtomWithTags;
+  atom: AtomSummary;
   x: number;
   y: number;
   isFaded: boolean;
@@ -50,8 +50,11 @@ export const AtomNode = memo(function AtomNode({
   onClick,
   atomId,
 }: AtomNodeProps) {
-  // Get first line of content, truncated to ~50 characters
-  const displayContent = getDisplayContent(atom.content);
+  // Use snippet (already stripped of markdown), truncate to ~50 chars
+  const displayContent = useMemo(() => {
+    const text = atom.snippet || 'Empty atom';
+    return text.length > 50 ? text.substring(0, 47) + '...' : text;
+  }, [atom.snippet]);
 
   // Get color from primary tag
   const tagColor = useMemo(() => {
@@ -140,22 +143,3 @@ export const AtomNode = memo(function AtomNode({
     </div>
   );
 });
-
-function getDisplayContent(content: string): string {
-  // Get first line
-  const firstLine = content.split('\n')[0] || '';
-  // Remove markdown formatting
-  const cleaned = firstLine
-    .replace(/^#+\s*/, '') // Remove heading markers
-    .replace(/\*\*/g, '')  // Remove bold
-    .replace(/\*/g, '')    // Remove italic
-    .replace(/`/g, '')     // Remove code
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // Replace links with text
-    .trim();
-
-  // Truncate to ~50 characters
-  if (cleaned.length > 50) {
-    return cleaned.substring(0, 47) + '...';
-  }
-  return cleaned || 'Empty atom';
-}
