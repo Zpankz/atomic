@@ -18,7 +18,14 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dirname, '..');
 
 // Forward any extra CLI args to atomic-server (e.g. --db-path, --port)
-const serverArgs = process.argv.slice(2);
+const extraArgs = process.argv.slice(2);
+
+// Default to serving on 0.0.0.0 so the API is reachable from other devices on
+// the local network.  The user can still override with explicit --bind.
+const hasServeSubcommand = extraArgs.includes('serve');
+const serverArgs = hasServeSubcommand
+  ? extraArgs
+  : [...extraArgs, 'serve', '--bind', '0.0.0.0'];
 
 const children = [];
 

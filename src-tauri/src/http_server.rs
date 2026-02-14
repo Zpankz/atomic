@@ -1,18 +1,18 @@
 use actix_cors::Cors;
 use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use atomic_core::AtomicCore;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp_actix_web::transport::StreamableHttpService;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::Emitter;
 
-use crate::commands;
-use crate::db::SharedDatabase;
+use crate::event_bridge::embedding_event_callback;
 use crate::mcp::AtomicMcpServer;
 use crate::models::CreateAtomRequest;
 
 pub struct AppState {
-    pub shared_db: SharedDatabase,
+    pub core: AtomicCore,
     pub app_handle: tauri::AppHandle,
 }
 
@@ -24,27 +24,15 @@ async fn health() -> impl Responder {
     }))
 }
 
-// Create atom endpoint (reuses existing command logic)
+// Create atom endpoint
 async fn create_atom(
     state: web::Data<AppState>,
     payload: web::Json<CreateAtomRequest>,
 ) -> impl Responder {
-    // Get a connection from the shared database
-    let conn = match state.shared_db.new_connection() {
-        Ok(conn) => conn,
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": format!("Database connection error: {}", e)
-            }));
-        }
-    };
+    let request: atomic_core::CreateAtomRequest = payload.into_inner().into();
+    let on_event = embedding_event_callback(state.app_handle.clone());
 
-    match commands::create_atom_impl(
-        &conn,
-        state.app_handle.clone(),
-        state.shared_db.clone(),
-        payload.into_inner(),
-    ) {
+    match state.core.create_atom(request, on_event) {
         Ok(atom) => {
             // Emit event to frontend to trigger immediate UI refresh
             state.app_handle.emit("atom-created", &atom).ok();
@@ -57,23 +45,23 @@ async fn create_atom(
 }
 
 pub async fn start_server(
-    shared_db: SharedDatabase,
+    core: AtomicCore,
     app_handle: tauri::AppHandle,
 ) -> std::io::Result<()> {
     let port = 44380; // Uncommon port, unlikely to conflict
 
     let app_state = web::Data::new(AppState {
-        shared_db: shared_db.clone(),
+        core: core.clone(),
         app_handle: app_handle.clone(),
     });
 
     // Create MCP service - must be created outside HttpServer::new for worker sharing
-    let mcp_db = shared_db.clone();
+    let mcp_core = core.clone();
     let mcp_handle = app_handle.clone();
 
     let mcp_service = StreamableHttpService::builder()
         .service_factory(Arc::new(move || {
-            Ok(AtomicMcpServer::new(mcp_db.clone(), mcp_handle.clone()))
+            Ok(AtomicMcpServer::new(mcp_core.clone(), mcp_handle.clone()))
         }))
         .session_manager(Arc::new(LocalSessionManager::default()))
         .stateful_mode(false) // Stateless since we share DB state

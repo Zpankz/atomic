@@ -21,6 +21,16 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'GET',
     path: '/api/atoms',
   },
+  list_atoms: {
+    method: 'GET',
+    path: (a) => {
+      const params = new URLSearchParams();
+      if (a.tagId) params.set('tag_id', a.tagId as string);
+      if (a.limit != null) params.set('limit', String(a.limit));
+      if (a.offset != null) params.set('offset', String(a.offset));
+      return `/api/atoms${params.toString() ? `?${params}` : ''}`;
+    },
+  },
   get_atoms_by_tag: {
     method: 'GET',
     path: (a) => `/api/atoms?tag_id=${encodeURIComponent(a.tagId as string)}`,

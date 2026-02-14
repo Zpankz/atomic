@@ -1,28 +1,27 @@
-use crate::commands;
-use crate::db::SharedDatabase;
+use crate::event_bridge::embedding_event_callback;
 use crate::mcp::types::*;
 use crate::models::CreateAtomRequest;
+use atomic_core::AtomicCore;
 use rmcp::{
     handler::server::tool::ToolRouter,
     handler::server::wrapper::Parameters,
     model::{CallToolResult, Content, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router, ErrorData, ServerHandler,
 };
-use std::sync::Arc;
 use tauri::Emitter;
 
 /// MCP Server for Atomic knowledge base
 #[derive(Clone)]
 pub struct AtomicMcpServer {
-    db: SharedDatabase,
+    core: AtomicCore,
     app_handle: tauri::AppHandle,
     tool_router: ToolRouter<Self>,
 }
 
 impl AtomicMcpServer {
-    pub fn new(db: SharedDatabase, app_handle: tauri::AppHandle) -> Self {
+    pub fn new(core: AtomicCore, app_handle: tauri::AppHandle) -> Self {
         Self {
-            db,
+            core,
             app_handle,
             tool_router: Self::tool_router(),
         }
@@ -42,12 +41,18 @@ impl AtomicMcpServer {
         let limit = params.limit.unwrap_or(10).min(50);
         let threshold = params.threshold.unwrap_or(0.3).clamp(0.0, 1.0);
 
-        // Use unified search module
-        let options = crate::search::SearchOptions::new(&params.query, crate::search::SearchMode::Semantic, limit)
-            .with_threshold(threshold);
-        let results = crate::search::search_atoms(self.db.as_core(), options)
+        let options = atomic_core::SearchOptions::new(
+            params.query,
+            atomic_core::SearchMode::Semantic,
+            limit,
+        )
+        .with_threshold(threshold);
+
+        let results = self
+            .core
+            .search(options)
             .await
-            .map_err(|e| ErrorData::internal_error(e, None))?;
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
         let search_results: Vec<SearchResult> = results
             .into_iter()
@@ -76,10 +81,10 @@ impl AtomicMcpServer {
         let limit = params.limit.unwrap_or(100).min(500) as usize;
         let offset = params.offset.unwrap_or(0).max(0) as usize;
 
-        let conn = self
-            .db
+        let db = self.core.database();
+        let conn = db
             .new_connection()
-            .map_err(|e| ErrorData::internal_error(e, None))?;
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
         // Get atom
         let atom_result: Result<(String, String, String, String), rusqlite::Error> = conn
@@ -141,24 +146,19 @@ impl AtomicMcpServer {
         &self,
         Parameters(params): Parameters<CreateAtomParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let conn = self
-            .db
-            .new_connection()
-            .map_err(|e| ErrorData::internal_error(e, None))?;
-
         let request = CreateAtomRequest {
             content: params.content.clone(),
             source_url: params.source_url,
             tag_ids: params.tag_ids.unwrap_or_default(),
         };
 
-        let result = commands::create_atom_impl(
-            &conn,
-            self.app_handle.clone(),
-            Arc::clone(&self.db),
-            request,
-        )
-        .map_err(|e| ErrorData::internal_error(e, None))?;
+        let on_event = embedding_event_callback(self.app_handle.clone());
+        let core_request: atomic_core::CreateAtomRequest = request.into();
+
+        let result = self
+            .core
+            .create_atom(core_request, on_event)
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
         // Emit event to frontend to trigger UI refresh
         let _ = self.app_handle.emit("atom-created", &result);

@@ -78,6 +78,7 @@ pub struct UpdateAtomRequest {
 }
 
 /// Main library facade providing high-level operations
+#[derive(Clone)]
 pub struct AtomicCore {
     db: Arc<Database>,
 }
@@ -219,11 +220,16 @@ impl AtomicCore {
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
-        let mut result = Vec::new();
-        for atom in atoms {
-            let tags = get_tags_for_atom(&conn, &atom.id)?;
-            result.push(AtomWithTags { atom, tags });
-        }
+        // Batch load all tags in a single query instead of N+1
+        let tag_map = get_all_atom_tags_map(&conn)?;
+
+        let result: Vec<AtomWithTags> = atoms
+            .into_iter()
+            .map(|atom| {
+                let tags = tag_map.get(&atom.id).cloned().unwrap_or_default();
+                AtomWithTags { atom, tags }
+            })
+            .collect();
 
         Ok(result)
     }
@@ -445,13 +451,145 @@ impl AtomicCore {
             .collect::<Result<Vec<_>, _>>()
             ?;
 
-        let mut result = Vec::new();
-        for atom in atoms {
-            let tags = get_tags_for_atom(&conn, &atom.id)?;
-            result.push(AtomWithTags { atom, tags });
-        }
+        // Batch load tags for the fetched atoms
+        let atom_ids: Vec<String> = atoms.iter().map(|a| a.id.clone()).collect();
+        let tag_map = get_atom_tags_map_for_ids(&conn, &atom_ids)?;
+
+        let result: Vec<AtomWithTags> = atoms
+            .into_iter()
+            .map(|atom| {
+                let tags = tag_map.get(&atom.id).cloned().unwrap_or_default();
+                AtomWithTags { atom, tags }
+            })
+            .collect();
 
         Ok(result)
+    }
+
+    /// List atoms with pagination and summaries (no full content).
+    /// This is the primary frontend-facing method for loading atom lists.
+    pub fn list_atoms(
+        &self,
+        tag_id: Option<&str>,
+        limit: i32,
+        offset: i32,
+    ) -> Result<PaginatedAtoms, AtomicCoreError> {
+        let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+
+        // If filtering by tag, get all descendant tag IDs
+        let all_tag_ids = if let Some(tid) = tag_id {
+            Some(get_descendant_tag_ids(&conn, tid)?)
+        } else {
+            None
+        };
+
+        // Count total
+        let total_count: i32 = if let Some(ref tag_ids) = all_tag_ids {
+            let placeholders = tag_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let count_query = format!(
+                "SELECT COUNT(DISTINCT a.id) FROM atoms a
+                 INNER JOIN atom_tags at ON a.id = at.atom_id
+                 WHERE at.tag_id IN ({})",
+                placeholders
+            );
+            conn.query_row(
+                &count_query,
+                rusqlite::params_from_iter(tag_ids.iter()),
+                |row| row.get(0),
+            )?
+        } else {
+            conn.query_row("SELECT COUNT(*) FROM atoms", [], |row| row.get(0))?
+        };
+
+        // Fetch page with SUBSTR to avoid full content transfer
+        let atoms: Vec<(String, String, Option<String>, String, String, String, String)> =
+            if let Some(ref tag_ids) = all_tag_ids {
+                let placeholders = tag_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let query = format!(
+                    "SELECT DISTINCT a.id, SUBSTR(a.content, 1, 250), a.source_url,
+                     a.created_at, a.updated_at,
+                     COALESCE(a.embedding_status, 'pending'), COALESCE(a.tagging_status, 'pending')
+                     FROM atoms a
+                     INNER JOIN atom_tags at ON a.id = at.atom_id
+                     WHERE at.tag_id IN ({})
+                     ORDER BY a.updated_at DESC
+                     LIMIT ?{} OFFSET ?{}",
+                    placeholders,
+                    tag_ids.len() + 1,
+                    tag_ids.len() + 2,
+                );
+                let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = tag_ids
+                    .iter()
+                    .map(|s| Box::new(s.clone()) as Box<dyn rusqlite::types::ToSql>)
+                    .collect();
+                params.push(Box::new(limit));
+                params.push(Box::new(offset));
+                let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+                    params.iter().map(|p| p.as_ref()).collect();
+                let mut stmt = conn.prepare(&query)?;
+                let rows = stmt.query_map(params_ref.as_slice(), |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+                rows
+            } else {
+                let mut stmt = conn.prepare(
+                    "SELECT id, SUBSTR(content, 1, 250), source_url,
+                     created_at, updated_at,
+                     COALESCE(embedding_status, 'pending'), COALESCE(tagging_status, 'pending')
+                     FROM atoms ORDER BY updated_at DESC LIMIT ?1 OFFSET ?2",
+                )?;
+                let rows = stmt.query_map(rusqlite::params![limit, offset], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+                rows
+            };
+
+        // Batch load tags for the page
+        let atom_ids: Vec<String> = atoms.iter().map(|a| a.0.clone()).collect();
+        let tag_map = get_atom_tags_map_for_ids(&conn, &atom_ids)?;
+
+        let summaries: Vec<AtomSummary> = atoms
+            .into_iter()
+            .map(|(id, raw_snippet, source_url, created_at, updated_at, embedding_status, tagging_status)| {
+                let tags = tag_map.get(&id).cloned().unwrap_or_default();
+                let snippet = strip_markdown_simple(&raw_snippet);
+                AtomSummary {
+                    id,
+                    snippet,
+                    source_url,
+                    created_at,
+                    updated_at,
+                    embedding_status,
+                    tagging_status,
+                    tags,
+                }
+            })
+            .collect();
+
+        Ok(PaginatedAtoms {
+            atoms: summaries,
+            total_count,
+            limit,
+            offset,
+        })
     }
 
     // ==================== Tag Operations ====================
@@ -477,7 +615,20 @@ impl AtomicCore {
             .collect::<Result<Vec<_>, _>>()
             ?;
 
-        Ok(build_tag_tree(&all_tags, None, &conn))
+        // Single query for all direct tag counts
+        let mut count_stmt = conn
+            .prepare("SELECT tag_id, COUNT(*) FROM atom_tags GROUP BY tag_id")?;
+        let mut direct_counts: std::collections::HashMap<String, i32> = std::collections::HashMap::new();
+        let count_rows = count_stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)?))
+            })?;
+        for row in count_rows {
+            let (tag_id, count) = row?;
+            direct_counts.insert(tag_id, count);
+        }
+
+        Ok(build_tag_tree_with_counts(&all_tags, None, &direct_counts))
     }
 
     /// Create a new tag
@@ -645,14 +796,21 @@ impl AtomicCore {
     pub fn reset_stuck_processing(&self) -> Result<i32, AtomicCoreError> {
         let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
 
-        let count = conn
+        let embedding_count = conn
             .execute(
                 "UPDATE atoms SET embedding_status = 'pending' WHERE embedding_status = 'processing'",
                 [],
             )
             ?;
 
-        Ok(count as i32)
+        let tagging_count = conn
+            .execute(
+                "UPDATE atoms SET tagging_status = 'pending' WHERE tagging_status = 'processing'",
+                [],
+            )
+            ?;
+
+        Ok((embedding_count + tagging_count) as i32)
     }
 
     /// Retry embedding for a specific atom
@@ -830,9 +988,746 @@ impl AtomicCore {
             .await
             .map_err(|e| AtomicCoreError::DatabaseOperation(e))
     }
+
+    // ==================== Canvas Operations ====================
+
+    /// Get all stored atom positions
+    pub fn get_atom_positions(&self) -> Result<Vec<AtomPosition>, AtomicCoreError> {
+        let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+
+        let mut stmt = conn.prepare("SELECT atom_id, x, y FROM atom_positions")?;
+
+        let positions = stmt
+            .query_map([], |row| {
+                Ok(AtomPosition {
+                    atom_id: row.get(0)?,
+                    x: row.get(1)?,
+                    y: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(positions)
+    }
+
+    /// Bulk save/update atom positions after simulation completes
+    pub fn save_atom_positions(&self, positions: &[AtomPosition]) -> Result<(), AtomicCoreError> {
+        let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        for pos in positions {
+            conn.execute(
+                "INSERT OR REPLACE INTO atom_positions (atom_id, x, y, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                (&pos.atom_id, &pos.x, &pos.y, &now),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Get atoms with their average embedding vector for similarity calculations
+    pub fn get_atoms_with_embeddings(&self) -> Result<Vec<AtomWithEmbedding>, AtomicCoreError> {
+        let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, content, source_url, created_at, updated_at,
+             COALESCE(embedding_status, 'pending'), COALESCE(tagging_status, 'pending')
+             FROM atoms ORDER BY updated_at DESC",
+        )?;
+
+        let atoms: Vec<Atom> = stmt
+            .query_map([], |row| {
+                Ok(Atom {
+                    id: row.get(0)?,
+                    content: row.get(1)?,
+                    source_url: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    embedding_status: row.get(5)?,
+                    tagging_status: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let tag_map = get_all_atom_tags_map(&conn)?;
+
+        let mut result = Vec::new();
+        for atom in atoms {
+            let tags = tag_map.get(&atom.id).cloned().unwrap_or_default();
+            let embedding = get_average_embedding(&conn, &atom.id)?;
+            result.push(AtomWithEmbedding {
+                atom: AtomWithTags { atom, tags },
+                embedding,
+            });
+        }
+
+        Ok(result)
+    }
+
+    // ==================== Semantic Graph Operations ====================
+
+    /// Get all semantic edges above a minimum similarity threshold
+    pub fn get_semantic_edges(&self, min_similarity: f32) -> Result<Vec<SemanticEdge>, AtomicCoreError> {
+        let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+
+        let mut stmt = conn.prepare(
+            "SELECT id, source_atom_id, target_atom_id, similarity_score,
+                    source_chunk_index, target_chunk_index, created_at
+             FROM semantic_edges
+             WHERE similarity_score >= ?1
+             ORDER BY similarity_score DESC",
+        )?;
+
+        let edges = stmt
+            .query_map([min_similarity], |row| {
+                Ok(SemanticEdge {
+                    id: row.get(0)?,
+                    source_atom_id: row.get(1)?,
+                    target_atom_id: row.get(2)?,
+                    similarity_score: row.get(3)?,
+                    source_chunk_index: row.get(4)?,
+                    target_chunk_index: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(edges)
+    }
+
+    /// Get neighborhood graph for an atom (for local graph view)
+    pub fn get_atom_neighborhood(
+        &self,
+        atom_id: &str,
+        depth: i32,
+        min_similarity: f32,
+    ) -> Result<NeighborhoodGraph, AtomicCoreError> {
+        let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        build_neighborhood_graph(&conn, atom_id, depth, min_similarity)
+    }
+
+    /// Rebuild semantic edges for all atoms with embeddings
+    pub fn rebuild_semantic_edges(&self) -> Result<i32, AtomicCoreError> {
+        let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT a.id FROM atoms a
+             INNER JOIN atom_chunks ac ON a.id = ac.atom_id
+             WHERE a.embedding_status = 'complete'",
+        )?;
+
+        let atom_ids: Vec<String> = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        conn.execute("DELETE FROM semantic_edges", [])?;
+
+        let mut total_edges = 0;
+        for (idx, atom_id) in atom_ids.iter().enumerate() {
+            match embedding::compute_semantic_edges_for_atom(&conn, atom_id, 0.5, 15) {
+                Ok(edge_count) => {
+                    total_edges += edge_count;
+                    if (idx + 1) % 50 == 0 {
+                        eprintln!(
+                            "Processed {}/{} atoms, {} edges so far",
+                            idx + 1,
+                            atom_ids.len(),
+                            total_edges
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to compute edges for atom {}: {}", atom_id, e);
+                }
+            }
+        }
+
+        Ok(total_edges)
+    }
+
+    // ==================== Embedding Status ====================
+
+    /// Get the embedding status for a specific atom
+    pub fn get_embedding_status(&self, atom_id: &str) -> Result<String, AtomicCoreError> {
+        let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+
+        let status: String = conn.query_row(
+            "SELECT COALESCE(embedding_status, 'pending') FROM atoms WHERE id = ?1",
+            [atom_id],
+            |row| row.get(0),
+        )?;
+
+        Ok(status)
+    }
+
+    /// Process pending tag extraction for atoms with complete embeddings
+    pub fn process_pending_tagging<F>(&self, on_event: F) -> Result<i32, AtomicCoreError>
+    where
+        F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
+    {
+        let pending_atoms: Vec<String> = {
+            let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+            let mut stmt = conn.prepare(
+                "UPDATE atoms SET tagging_status = 'processing'
+                 WHERE embedding_status = 'complete'
+                 AND tagging_status = 'pending'
+                 RETURNING id",
+            )?;
+            let results = stmt.query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            results
+        };
+
+        let count = pending_atoms.len() as i32;
+
+        if count > 0 {
+            let db = Arc::clone(&self.db);
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(embedding::process_tagging_batch(db, pending_atoms, on_event));
+            });
+        }
+
+        Ok(count)
+    }
+
+    // ==================== Cluster Cache ====================
+
+    /// Get cached clusters, computing if missing
+    pub fn get_clusters(&self) -> Result<Vec<AtomCluster>, AtomicCoreError> {
+        let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+
+        let count: i32 = conn
+            .query_row("SELECT COUNT(*) FROM atom_clusters", [], |row| row.get(0))
+            .unwrap_or(0);
+
+        if count == 0 {
+            let clusters = clustering::compute_atom_clusters(&conn, 0.5, 2)
+                .map_err(|e| AtomicCoreError::Clustering(e))?;
+            clustering::save_cluster_assignments(&conn, &clusters)
+                .map_err(|e| AtomicCoreError::Clustering(e))?;
+            return Ok(clusters);
+        }
+
+        // Rebuild from cached assignments
+        let mut stmt = conn.prepare(
+            "SELECT ac.cluster_id, GROUP_CONCAT(ac.atom_id)
+             FROM atom_clusters ac
+             GROUP BY ac.cluster_id
+             ORDER BY COUNT(*) DESC",
+        )?;
+
+        let clusters: Vec<AtomCluster> = stmt
+            .query_map([], |row| {
+                let cluster_id: i32 = row.get(0)?;
+                let atom_ids_str: String = row.get(1)?;
+                let atom_ids: Vec<String> = atom_ids_str.split(',').map(|s| s.to_string()).collect();
+                Ok((cluster_id, atom_ids))
+            })?
+            .filter_map(|r| r.ok())
+            .map(|(cluster_id, atom_ids)| {
+                let dominant_tags = get_dominant_tags_for_cluster(&conn, &atom_ids).unwrap_or_default();
+                AtomCluster {
+                    cluster_id,
+                    atom_ids,
+                    dominant_tags,
+                }
+            })
+            .collect();
+
+        Ok(clusters)
+    }
+
+    // ==================== Settings with Re-embed ====================
+
+    /// Set a setting, handling embedding dimension changes.
+    /// Returns (dimension_changed, pending_reembed_count).
+    pub fn set_setting_with_reembed<F>(
+        &self,
+        key: &str,
+        value: &str,
+        on_event: F,
+    ) -> Result<(bool, i32), AtomicCoreError>
+    where
+        F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
+    {
+        let dimension_affecting_keys = ["provider", "embedding_model", "ollama_embedding_model"];
+        let mut dimension_changed = false;
+
+        {
+            let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+
+            if dimension_affecting_keys.contains(&key) {
+                let (will_change, new_dim) = db::will_dimension_change(&conn, key, value);
+                if will_change {
+                    let current_dim = db::get_current_embedding_dimension(&conn);
+                    eprintln!(
+                        "Embedding dimension changing from {} to {} due to {} change - recreating vec_chunks",
+                        current_dim, new_dim, key
+                    );
+                    db::recreate_vec_chunks_with_dimension(&conn, new_dim)?;
+                    dimension_changed = true;
+                }
+            }
+
+            settings::set_setting(&conn, key, value)?;
+        }
+
+        let mut pending_count = 0i32;
+        if dimension_changed {
+            let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+            pending_count = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM atoms WHERE embedding_status = 'pending'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+
+            if pending_count > 0 {
+                let mut stmt = conn.prepare(
+                    "UPDATE atoms SET embedding_status = 'processing'
+                     WHERE embedding_status IN ('pending', 'processing')
+                     RETURNING id, content",
+                )?;
+                let pending_atoms: Vec<(String, String)> = stmt
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                drop(stmt);
+                drop(conn);
+
+                let db = Arc::clone(&self.db);
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    rt.block_on(embedding::process_embedding_batch(
+                        db,
+                        pending_atoms,
+                        true, // skip tagging - re-embedding only
+                        on_event,
+                    ));
+                });
+            }
+        }
+
+        Ok((dimension_changed, pending_count))
+    }
+
+    // ==================== Utility Operations ====================
+
+    /// Check sqlite-vec version
+    pub fn check_sqlite_vec(&self) -> Result<String, AtomicCoreError> {
+        let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        let version: String = conn.query_row("SELECT vec_version()", [], |row| row.get(0))?;
+        Ok(version)
+    }
+
+    /// Verify that the current provider is properly configured
+    pub fn verify_provider_configured(&self) -> Result<bool, AtomicCoreError> {
+        let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        let settings_map = settings::get_all_settings(&conn)?;
+        let config = ProviderConfig::from_settings(&settings_map);
+
+        match config.provider_type {
+            ProviderType::OpenRouter => {
+                Ok(config.openrouter_api_key.as_ref().map_or(false, |k| !k.is_empty()))
+            }
+            ProviderType::Ollama => Ok(!config.ollama_host.is_empty()),
+        }
+    }
+
+    /// Get all wiki articles (summaries for list view)
+    pub fn get_all_wiki_articles(&self) -> Result<Vec<WikiArticleSummary>, AtomicCoreError> {
+        let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        wiki::load_all_wiki_articles(&conn).map_err(|e| AtomicCoreError::Wiki(e))
+    }
 }
 
 // ==================== Helper Functions ====================
+
+/// Calculate average embedding from all chunks of an atom
+fn get_average_embedding(
+    conn: &Connection,
+    atom_id: &str,
+) -> Result<Option<Vec<f32>>, AtomicCoreError> {
+    let mut stmt = conn
+        .prepare("SELECT embedding FROM atom_chunks WHERE atom_id = ?1 AND embedding IS NOT NULL")?;
+
+    let embeddings: Vec<Vec<u8>> = stmt
+        .query_map([atom_id], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if embeddings.is_empty() {
+        return Ok(None);
+    }
+
+    let dim = embeddings[0].len() / 4;
+    let mut avg = vec![0.0f32; dim];
+    let count = embeddings.len() as f32;
+
+    for blob in &embeddings {
+        if blob.len() != dim * 4 {
+            continue;
+        }
+        for i in 0..dim {
+            let bytes: [u8; 4] = [
+                blob[i * 4],
+                blob[i * 4 + 1],
+                blob[i * 4 + 2],
+                blob[i * 4 + 3],
+            ];
+            avg[i] += f32::from_le_bytes(bytes);
+        }
+    }
+
+    for val in &mut avg {
+        *val /= count;
+    }
+
+    Ok(Some(avg))
+}
+
+/// Get dominant tags for a cluster of atoms
+fn get_dominant_tags_for_cluster(
+    conn: &Connection,
+    atom_ids: &[String],
+) -> Result<Vec<String>, AtomicCoreError> {
+    if atom_ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let placeholders: Vec<String> = atom_ids.iter().map(|_| "?".to_string()).collect();
+    let placeholders_str = placeholders.join(",");
+
+    let sql = format!(
+        "SELECT t.name, COUNT(*) as cnt
+         FROM atom_tags at
+         JOIN tags t ON at.tag_id = t.id
+         WHERE at.atom_id IN ({})
+         GROUP BY t.id
+         ORDER BY cnt DESC
+         LIMIT 3",
+        placeholders_str
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+
+    let params: Vec<&dyn rusqlite::ToSql> = atom_ids
+        .iter()
+        .map(|s| s as &dyn rusqlite::ToSql)
+        .collect();
+
+    let tags: Vec<String> = stmt
+        .query_map(params.as_slice(), |row| row.get(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(tags)
+}
+
+/// Build neighborhood graph for an atom
+fn build_neighborhood_graph(
+    conn: &Connection,
+    atom_id: &str,
+    depth: i32,
+    min_similarity: f32,
+) -> Result<NeighborhoodGraph, AtomicCoreError> {
+    use std::collections::HashMap;
+
+    let mut atoms_at_depth: HashMap<String, i32> = HashMap::new();
+    atoms_at_depth.insert(atom_id.to_string(), 0);
+
+    // Depth 1 semantic connections
+    {
+        let mut stmt = conn.prepare(
+            "SELECT
+                CASE WHEN source_atom_id = ?1 THEN target_atom_id ELSE source_atom_id END as other_atom_id,
+                similarity_score
+             FROM semantic_edges
+             WHERE (source_atom_id = ?1 OR target_atom_id = ?1)
+               AND similarity_score >= ?2
+             ORDER BY similarity_score DESC
+             LIMIT 20",
+        )?;
+
+        let results: Vec<(String, f32)> = stmt
+            .query_map(rusqlite::params![atom_id, min_similarity], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for (other_id, _) in &results {
+            atoms_at_depth.entry(other_id.clone()).or_insert(1);
+        }
+    }
+
+    // Depth 1 tag connections
+    let center_tags: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT tag_id FROM atom_tags WHERE atom_id = ?1")?;
+        let results = stmt.query_map([atom_id], |row| row.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        results
+    };
+
+    if !center_tags.is_empty() {
+        let placeholders: String = center_tags.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let query = format!(
+            "SELECT atom_id, COUNT(*) as shared_count
+             FROM atom_tags
+             WHERE tag_id IN ({})
+               AND atom_id != ?
+             GROUP BY atom_id
+             HAVING shared_count >= 1
+             ORDER BY shared_count DESC
+             LIMIT 20",
+            placeholders
+        );
+
+        let mut stmt = conn.prepare(&query)?;
+        let mut params: Vec<&dyn rusqlite::ToSql> = center_tags
+            .iter()
+            .map(|s| s as &dyn rusqlite::ToSql)
+            .collect();
+        params.push(&atom_id);
+
+        let tag_results: Vec<(String, i32)> = stmt
+            .query_map(params.as_slice(), |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for (other_id, _) in &tag_results {
+            atoms_at_depth.entry(other_id.clone()).or_insert(1);
+        }
+    }
+
+    // Depth 2 if requested
+    if depth >= 2 {
+        let depth1_ids: Vec<String> = atoms_at_depth
+            .iter()
+            .filter(|(_, d)| **d == 1)
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        for d1_id in &depth1_ids {
+            let mut stmt = conn.prepare(
+                "SELECT
+                    CASE WHEN source_atom_id = ?1 THEN target_atom_id ELSE source_atom_id END
+                 FROM semantic_edges
+                 WHERE (source_atom_id = ?1 OR target_atom_id = ?1)
+                   AND similarity_score >= ?2
+                 ORDER BY similarity_score DESC
+                 LIMIT 5",
+            )?;
+
+            let d2_ids: Vec<String> = stmt
+                .query_map(rusqlite::params![d1_id, min_similarity], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            for d2_id in d2_ids {
+                atoms_at_depth.entry(d2_id).or_insert(2);
+            }
+        }
+    }
+
+    // Limit total atoms
+    let max_atoms = if depth >= 2 { 30 } else { 20 };
+    let mut sorted_atoms: Vec<(String, i32)> = atoms_at_depth.into_iter().collect();
+    sorted_atoms.sort_by_key(|(_, d)| *d);
+    sorted_atoms.truncate(max_atoms);
+
+    let atom_ids: Vec<String> = sorted_atoms.iter().map(|(id, _)| id.clone()).collect();
+    let atom_depths: HashMap<String, i32> = sorted_atoms.into_iter().collect();
+
+    // Fetch atom data
+    let mut atoms = Vec::new();
+    for aid in &atom_ids {
+        let atom = conn.query_row(
+            "SELECT id, content, source_url, created_at, updated_at,
+                    COALESCE(embedding_status, 'pending'), COALESCE(tagging_status, 'pending')
+             FROM atoms WHERE id = ?1",
+            [aid],
+            |row| {
+                Ok(Atom {
+                    id: row.get(0)?,
+                    content: row.get(1)?,
+                    source_url: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    embedding_status: row.get(5)?,
+                    tagging_status: row.get(6)?,
+                })
+            },
+        )?;
+
+        let tags = get_tags_for_atom(conn, aid)?;
+        let depth = *atom_depths.get(aid).unwrap_or(&0);
+
+        atoms.push(NeighborhoodAtom {
+            atom: AtomWithTags { atom, tags },
+            depth,
+        });
+    }
+
+    // Build edges
+    let mut edges = Vec::new();
+    for i in 0..atom_ids.len() {
+        for j in (i + 1)..atom_ids.len() {
+            let id_a = &atom_ids[i];
+            let id_b = &atom_ids[j];
+
+            let semantic_score: Option<f32> = conn
+                .query_row(
+                    "SELECT similarity_score FROM semantic_edges
+                     WHERE (source_atom_id = ?1 AND target_atom_id = ?2)
+                        OR (source_atom_id = ?2 AND target_atom_id = ?1)",
+                    [id_a, id_b],
+                    |row| row.get(0),
+                )
+                .ok();
+
+            let shared_tags: i32 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM atom_tags a1
+                     INNER JOIN atom_tags a2 ON a1.tag_id = a2.tag_id
+                     WHERE a1.atom_id = ?1 AND a2.atom_id = ?2",
+                    [id_a, id_b],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+
+            if semantic_score.is_some() || shared_tags > 0 {
+                let edge_type = match (semantic_score.is_some(), shared_tags > 0) {
+                    (true, true) => "both",
+                    (true, false) => "semantic",
+                    (false, true) => "tag",
+                    (false, false) => continue,
+                };
+
+                let semantic_strength = semantic_score.unwrap_or(0.0);
+                let tag_strength = (shared_tags as f32 * 0.15).min(0.6);
+                let strength = (semantic_strength + tag_strength).min(1.0);
+
+                edges.push(NeighborhoodEdge {
+                    source_id: id_a.clone(),
+                    target_id: id_b.clone(),
+                    edge_type: edge_type.to_string(),
+                    strength,
+                    shared_tag_count: shared_tags,
+                    similarity_score: semantic_score,
+                });
+            }
+        }
+    }
+
+    Ok(NeighborhoodGraph {
+        center_atom_id: atom_id.to_string(),
+        atoms,
+        edges,
+    })
+}
+
+// ==================== Helper Functions ====================
+
+/// Simple markdown stripping for snippets (server-side).
+fn strip_markdown_simple(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    for line in text.lines() {
+        let trimmed = line.trim();
+        // Skip code fence markers
+        if trimmed.starts_with("```") {
+            continue;
+        }
+        // Strip heading markers
+        let stripped = if trimmed.starts_with('#') {
+            trimmed.trim_start_matches('#').trim_start()
+        } else {
+            trimmed
+        };
+        if !stripped.is_empty() {
+            if !result.is_empty() {
+                result.push(' ');
+            }
+            result.push_str(stripped);
+        }
+    }
+    // Strip inline markdown: bold, italic, links, inline code, images
+    let result = result
+        .replace("**", "")
+        .replace("__", "");
+    // Simple regex-free link removal: [text](url) -> text
+    let mut out = String::with_capacity(result.len());
+    let mut chars = result.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '!' && chars.peek() == Some(&'[') {
+            // Image: ![alt](url) -> skip
+            chars.next(); // consume '['
+            let mut depth = 1;
+            while depth > 0 {
+                match chars.next() {
+                    Some('[') => depth += 1,
+                    Some(']') => depth -= 1,
+                    None => break,
+                    _ => {}
+                }
+            }
+            if chars.peek() == Some(&'(') {
+                chars.next();
+                let mut depth = 1;
+                while depth > 0 {
+                    match chars.next() {
+                        Some('(') => depth += 1,
+                        Some(')') => depth -= 1,
+                        None => break,
+                        _ => {}
+                    }
+                }
+            }
+        } else if ch == '[' {
+            // Link: [text](url) -> text
+            let mut text_buf = String::new();
+            let mut depth = 1;
+            while depth > 0 {
+                match chars.next() {
+                    Some('[') => { depth += 1; text_buf.push('['); }
+                    Some(']') => { depth -= 1; if depth > 0 { text_buf.push(']'); } }
+                    Some(c) => text_buf.push(c),
+                    None => break,
+                }
+            }
+            if chars.peek() == Some(&'(') {
+                chars.next();
+                let mut depth = 1;
+                while depth > 0 {
+                    match chars.next() {
+                        Some('(') => depth += 1,
+                        Some(')') => depth -= 1,
+                        None => break,
+                        _ => {}
+                    }
+                }
+                out.push_str(&text_buf);
+            } else {
+                out.push('[');
+                out.push_str(&text_buf);
+                out.push(']');
+            }
+        } else if ch == '`' {
+            // Inline code: `code` -> code
+            while let Some(c) = chars.next() {
+                if c == '`' { break; }
+                out.push(c);
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    // Truncate to ~200 chars
+    if out.len() > 200 {
+        let truncated: String = out.chars().take(200).collect();
+        format!("{}...", truncated.trim_end())
+    } else {
+        out
+    }
+}
 
 /// Get tags for a specific atom
 fn get_tags_for_atom(conn: &Connection, atom_id: &str) -> Result<Vec<Tag>, AtomicCoreError> {
@@ -859,6 +1754,79 @@ fn get_tags_for_atom(conn: &Connection, atom_id: &str) -> Result<Vec<Tag>, Atomi
         ?;
 
     Ok(tags)
+}
+
+/// Bulk fetch all atom-tag relationships in a single query.
+/// Returns a map from atom_id to Vec<Tag>.
+fn get_all_atom_tags_map(conn: &Connection) -> Result<std::collections::HashMap<String, Vec<Tag>>, AtomicCoreError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT at.atom_id, t.id, t.name, t.parent_id, t.created_at
+             FROM atom_tags at
+             INNER JOIN tags t ON at.tag_id = t.id",
+        )?;
+
+    let mut map: std::collections::HashMap<String, Vec<Tag>> = std::collections::HashMap::new();
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                Tag {
+                    id: row.get(1)?,
+                    name: row.get(2)?,
+                    parent_id: row.get(3)?,
+                    created_at: row.get(4)?,
+                },
+            ))
+        })?;
+
+    for row in rows {
+        let (atom_id, tag) = row?;
+        map.entry(atom_id).or_default().push(tag);
+    }
+
+    Ok(map)
+}
+
+/// Bulk fetch atom-tag relationships for a specific set of atom IDs.
+fn get_atom_tags_map_for_ids(conn: &Connection, atom_ids: &[String]) -> Result<std::collections::HashMap<String, Vec<Tag>>, AtomicCoreError> {
+    if atom_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let placeholders = atom_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let query = format!(
+        "SELECT at.atom_id, t.id, t.name, t.parent_id, t.created_at
+         FROM atom_tags at
+         INNER JOIN tags t ON at.tag_id = t.id
+         WHERE at.atom_id IN ({})",
+        placeholders
+    );
+
+    let mut stmt = conn.prepare(&query)?;
+
+    let mut map: std::collections::HashMap<String, Vec<Tag>> = std::collections::HashMap::new();
+
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(atom_ids.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                Tag {
+                    id: row.get(1)?,
+                    name: row.get(2)?,
+                    parent_id: row.get(3)?,
+                    created_at: row.get(4)?,
+                },
+            ))
+        })?;
+
+    for row in rows {
+        let (atom_id, tag) = row?;
+        map.entry(atom_id).or_default().push(tag);
+    }
+
+    Ok(map)
 }
 
 /// Get all descendant tag IDs (including the tag itself)
@@ -899,41 +1867,49 @@ fn get_descendant_ids(tag_id: &str, all_tags: &[Tag]) -> Vec<String> {
     result
 }
 
-/// Build hierarchical tag tree with counts
-fn build_tag_tree(
+/// Build hierarchical tag tree with counts using pre-computed direct counts.
+/// Each parent's count = its own direct count + sum of children's counts.
+/// (May double-count atoms tagged with both parent and child; acceptable for display.)
+fn build_tag_tree_with_counts(
     all_tags: &[Tag],
-    parent_id: Option<&str>,
-    conn: &Connection,
+    _parent_id: Option<&str>,
+    direct_counts: &std::collections::HashMap<String, i32>,
 ) -> Vec<TagWithCount> {
-    all_tags
-        .iter()
-        .filter(|tag| tag.parent_id.as_deref() == parent_id)
-        .map(|tag| {
-            let children = build_tag_tree(all_tags, Some(&tag.id), conn);
+    // Build index: parent_id -> children, so each lookup is O(1) instead of O(N)
+    let mut children_by_parent: std::collections::HashMap<Option<&str>, Vec<&Tag>> =
+        std::collections::HashMap::new();
+    for tag in all_tags {
+        children_by_parent
+            .entry(tag.parent_id.as_deref())
+            .or_default()
+            .push(tag);
+    }
 
-            // Get all descendant tag IDs including this tag
-            let descendant_ids = get_descendant_ids(&tag.id, all_tags);
+    fn build_subtree(
+        parent_id: Option<&str>,
+        children_by_parent: &std::collections::HashMap<Option<&str>, Vec<&Tag>>,
+        direct_counts: &std::collections::HashMap<String, i32>,
+    ) -> Vec<TagWithCount> {
+        let Some(children) = children_by_parent.get(&parent_id) else {
+            return Vec::new();
+        };
+        children
+            .iter()
+            .map(|tag| {
+                let child_nodes =
+                    build_subtree(Some(&tag.id), children_by_parent, direct_counts);
+                let own_count = direct_counts.get(&tag.id).copied().unwrap_or(0);
+                let children_count: i32 = child_nodes.iter().map(|c| c.atom_count).sum();
+                TagWithCount {
+                    tag: (*tag).clone(),
+                    atom_count: own_count + children_count,
+                    children: child_nodes,
+                }
+            })
+            .collect()
+    }
 
-            // Count distinct atoms across this tag and all descendants
-            let placeholders = descendant_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let query = format!(
-                "SELECT COUNT(DISTINCT atom_id) FROM atom_tags WHERE tag_id IN ({})",
-                placeholders
-            );
-
-            let atom_count: i32 = conn
-                .query_row(&query, rusqlite::params_from_iter(descendant_ids.iter()), |row| {
-                    row.get(0)
-                })
-                .unwrap_or(0);
-
-            TagWithCount {
-                tag: tag.clone(),
-                atom_count,
-                children,
-            }
-        })
-        .collect()
+    build_subtree(None, &children_by_parent, direct_counts)
 }
 
 #[cfg(test)]

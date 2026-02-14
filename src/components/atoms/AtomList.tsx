@@ -1,13 +1,14 @@
-import { memo, useRef } from 'react';
+import { memo, useRef, useEffect } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { AtomWithTags } from '../../stores/atoms';
+import { DisplayAtom } from '../../stores/atoms';
 import { AtomCard } from './AtomCard';
 
 interface AtomListProps {
-  atoms: AtomWithTags[];
+  atoms: DisplayAtom[];
   onAtomClick: (atomId: string) => void;
   getMatchingChunkContent?: (atomId: string) => string | undefined;
   onRetryEmbedding?: (atomId: string) => void;
+  onLoadMore?: () => void;
 }
 
 export const AtomList = memo(function AtomList({
@@ -15,6 +16,7 @@ export const AtomList = memo(function AtomList({
   onAtomClick,
   getMatchingChunkContent,
   onRetryEmbedding,
+  onLoadMore,
 }: AtomListProps) {
   const parentRef = useRef<HTMLDivElement>(null);
 
@@ -25,6 +27,17 @@ export const AtomList = memo(function AtomList({
     overscan: 10,
     gap: 8,
   });
+
+  // Load more when nearing the end
+  useEffect(() => {
+    if (!onLoadMore) return;
+    const items = virtualizer.getVirtualItems();
+    if (items.length === 0) return;
+    const lastItem = items[items.length - 1];
+    if (lastItem && lastItem.index >= atoms.length - 10) {
+      onLoadMore();
+    }
+  }, [virtualizer.getVirtualItems(), atoms.length, onLoadMore]);
 
   if (atoms.length === 0) {
     return (

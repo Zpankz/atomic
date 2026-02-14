@@ -12,7 +12,7 @@ mod state;
 mod ws;
 
 use actix_cors::Cors;
-use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{middleware, web, App, HttpResponse, HttpServer, Responder};
 use clap::Parser;
 use config::{Cli, Command, TokenAction};
 use state::AppState;
@@ -148,6 +148,29 @@ async fn run_server(
         bind, port
     );
 
+    // Startup recovery: reset stuck atoms and process any pending work
+    {
+        let on_event = event_bridge::embedding_event_callback(app_state.event_tx.clone());
+
+        match app_state.core.reset_stuck_processing() {
+            Ok(count) if count > 0 => println!("  Reset {} atoms stuck in processing state", count),
+            Ok(_) => {}
+            Err(e) => eprintln!("  Warning: failed to reset stuck processing: {}", e),
+        }
+
+        match app_state.core.process_pending_embeddings(on_event.clone()) {
+            Ok(count) if count > 0 => println!("  Processing {} pending embeddings in background", count),
+            Ok(_) => {}
+            Err(e) => eprintln!("  Warning: failed to start pending embeddings: {}", e),
+        }
+
+        match app_state.core.process_pending_tagging(on_event) {
+            Ok(count) if count > 0 => println!("  Processing {} pending tagging operations in background", count),
+            Ok(_) => {}
+            Err(e) => eprintln!("  Warning: failed to start pending tagging: {}", e),
+        }
+    }
+
     let bind_owned = bind.to_string();
 
     HttpServer::new(move || {
@@ -155,6 +178,7 @@ async fn run_server(
 
         App::new()
             .wrap(cors)
+            .wrap(middleware::Compress::default())
             .app_data(app_state.clone())
             // Public routes (no auth)
             .route("/health", web::get().to(health))

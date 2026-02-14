@@ -1,8 +1,28 @@
-const SERVER_URL = 'http://localhost:44380';
+import { getConfig, authHeaders } from '../lib/config.js';
+
 const QUEUE_KEY = 'captureQueue';
 
 // Update UI on popup open
 document.addEventListener('DOMContentLoaded', async () => {
+  const config = await getConfig();
+
+  // Settings link
+  document.getElementById('settings-link').onclick = (e) => {
+    e.preventDefault();
+    chrome.runtime.openOptionsPage();
+  };
+
+  // Setup prompt for unconfigured state
+  document.getElementById('open-settings').onclick = () => {
+    chrome.runtime.openOptionsPage();
+  };
+
+  // Show setup prompt if no token configured
+  if (!config.apiToken) {
+    document.getElementById('setup-prompt').style.display = 'block';
+    document.getElementById('actions').style.display = 'none';
+  }
+
   await updateStatus();
   await updateQueue();
 
@@ -16,9 +36,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 async function updateStatus() {
   const statusEl = document.getElementById('status');
   const labelEl = document.getElementById('status-label');
+  const { serverUrl, apiToken } = await getConfig();
 
   try {
-    const response = await fetch(`${SERVER_URL}/health`);
+    const response = await fetch(`${serverUrl}/health`, {
+      headers: authHeaders(apiToken)
+    });
     if (response.ok) {
       statusEl.classList.remove('offline');
       labelEl.textContent = 'Connected to Atomic';
@@ -60,13 +83,7 @@ async function getQueue() {
 // Capture from current tab
 async function captureCurrentTab(mode) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-
-  // Send message to background script
-  chrome.runtime.sendMessage({
-    action: 'capture',
-    tabId: tab.id,
-    mode: mode
-  });
+  const { serverUrl, apiToken } = await getConfig();
 
   // Send message to content script
   try {
@@ -77,9 +94,9 @@ async function captureCurrentTab(mode) {
 
     if (result && result.content) {
       // Try to send directly to server
-      const response = await fetch(`${SERVER_URL}/atoms`, {
+      const response = await fetch(`${serverUrl}/api/atoms`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(apiToken),
         body: JSON.stringify({
           content: result.content,
           source_url: result.url,

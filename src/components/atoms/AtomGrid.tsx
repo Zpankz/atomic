@@ -1,6 +1,6 @@
-import { memo, useRef } from 'react';
+import { memo, useRef, useEffect } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { AtomWithTags } from '../../stores/atoms';
+import { DisplayAtom } from '../../stores/atoms';
 import { AtomCard } from './AtomCard';
 import { useContainerWidth } from '../../hooks/useContainerWidth';
 
@@ -10,10 +10,11 @@ const PADDING = 16;
 const ROW_HEIGHT = 220;
 
 interface AtomGridProps {
-  atoms: AtomWithTags[];
+  atoms: DisplayAtom[];
   onAtomClick: (atomId: string) => void;
   getMatchingChunkContent?: (atomId: string) => string | undefined;
   onRetryEmbedding?: (atomId: string) => void;
+  onLoadMore?: () => void;
 }
 
 export const AtomGrid = memo(function AtomGrid({
@@ -21,6 +22,7 @@ export const AtomGrid = memo(function AtomGrid({
   onAtomClick,
   getMatchingChunkContent,
   onRetryEmbedding,
+  onLoadMore,
 }: AtomGridProps) {
   const parentRef = useRef<HTMLDivElement>(null);
   const containerWidth = useContainerWidth(parentRef);
@@ -39,6 +41,17 @@ export const AtomGrid = memo(function AtomGrid({
     gap: CARD_GAP,
     enabled: ready,
   });
+
+  // Load more when nearing the end
+  useEffect(() => {
+    if (!onLoadMore || !ready) return;
+    const items = virtualizer.getVirtualItems();
+    if (items.length === 0) return;
+    const lastItem = items[items.length - 1];
+    if (lastItem && lastItem.index >= rowCount - 3) {
+      onLoadMore();
+    }
+  }, [virtualizer.getVirtualItems(), rowCount, onLoadMore, ready]);
 
   if (atoms.length === 0) {
     return (

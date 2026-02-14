@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { TransformWrapper, TransformComponent, useControls } from 'react-zoom-pan-pinch';
-import { AtomWithTags } from '../../stores/atoms';
+import { AtomSummary } from '../../stores/atoms';
 import { CanvasContent } from './CanvasContent';
 import { CanvasControls } from './CanvasControls';
 import { Connection } from './ConnectionLines';
@@ -56,7 +56,7 @@ function ZoomToHighlight({ atomId, nodePositions, onComplete }: ZoomToHighlightP
 }
 
 interface CanvasViewProps {
-  atoms: AtomWithTags[];
+  atoms: AtomSummary[];
   selectedTagId: string | null;
   searchResultIds: string[] | null; // atom IDs matching search, null = not searching
   highlightedAtomId: string | null;

@@ -1,23 +1,7 @@
 //! Data models for Atomic Tauri app
 //!
-//! This module re-exports types from atomic-core and defines Tauri-specific types.
+//! This module defines Tauri-specific types and conversions.
 
-// Re-export all KB types from atomic-core
-pub use atomic_core::{
-    Atom, AtomCluster, AtomPosition, AtomWithEmbedding, AtomWithTags,
-    EmbeddingCompletePayload, NeighborhoodAtom, NeighborhoodEdge, NeighborhoodGraph,
-    SemanticEdge, SemanticSearchResult, SimilarAtomResult, Tag, TagWithCount,
-    TaggingCompletePayload, WikiArticleStatus, WikiArticleSummary,
-    WikiArticleWithCitations,
-};
-
-// Re-export chat types from atomic-core
-pub use atomic_core::{
-    ChatMessageWithContext, Conversation, ConversationWithMessages, ConversationWithTags,
-};
-
-// Note: CreateAtomRequest is defined in atomic-core lib.rs as a facade type
-// We define a local version for the Tauri command compatibility
 use serde::{Deserialize, Serialize};
 
 /// Request payload for creating an atom (used by both Tauri commands and HTTP API)

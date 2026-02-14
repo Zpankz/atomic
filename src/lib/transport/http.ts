@@ -12,6 +12,7 @@ export class HttpTransport implements Transport {
   private reconnectDelay = 1000;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private wsUrl: string | null = null;
+  private authExpired = false;
   onConnectionChange?: (connected: boolean) => void;
 
   constructor(config: HttpTransportConfig) {
@@ -25,7 +26,13 @@ export class HttpTransport implements Transport {
       .replace(/^http/, 'ws')
       .replace(/\/$/, '')
       + `/ws?token=${encodeURIComponent(this.config.authToken)}`;
-    await this.connectWs();
+    try {
+      await this.connectWs();
+    } catch {
+      // WebSocket failed (stale token, server down, etc.) — don't block app startup.
+      // HTTP calls will detect auth issues; reconnect will retry in background.
+      this.scheduleReconnect();
+    }
   }
 
   private connectWs(): Promise<void> {
@@ -94,6 +101,10 @@ export class HttpTransport implements Transport {
   }
 
   async invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+    if (this.authExpired) {
+      throw new Error('Authentication expired. Please reconnect with a valid token.');
+    }
+
     if (!this.config.baseUrl) {
       throw new Error('Not connected to a server');
     }
@@ -123,7 +134,9 @@ export class HttpTransport implements Transport {
 
     if (!resp.ok) {
       if (resp.status === 401) {
-        // Token is invalid or revoked — clear stored config and notify
+        // Token is invalid or revoked — stop all activity and trigger logout
+        this.authExpired = true;
+        this.disconnect();
         localStorage.removeItem('atomic-server-config');
         window.dispatchEvent(new CustomEvent('atomic:auth-expired'));
         throw new Error('Authentication expired. Please reconnect with a valid token.');

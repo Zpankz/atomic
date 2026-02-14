@@ -11,17 +11,21 @@ use serde::Deserialize;
 #[derive(Deserialize)]
 pub struct GetAtomsQuery {
     pub tag_id: Option<String>,
+    pub limit: Option<i32>,
+    pub offset: Option<i32>,
 }
 
 pub async fn get_atoms(
     state: web::Data<AppState>,
     query: web::Query<GetAtomsQuery>,
 ) -> HttpResponse {
-    let result = if let Some(ref tag_id) = query.tag_id {
-        state.core.get_atoms_by_tag(tag_id)
-    } else {
-        state.core.get_all_atoms()
-    };
+    let limit = query.limit.unwrap_or(50);
+    let offset = query.offset.unwrap_or(0);
+    let result = state.core.list_atoms(
+        query.tag_id.as_deref(),
+        limit,
+        offset,
+    );
     ok_or_error(result)
 }
 

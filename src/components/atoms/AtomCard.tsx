@@ -1,11 +1,11 @@
 import { memo } from 'react';
-import { AtomWithTags } from '../../stores/atoms';
+import { DisplayAtom, AtomSummary } from '../../stores/atoms';
 import { TagChip } from '../tags/TagChip';
 import { extractTitleAndSnippet } from '../../lib/markdown';
 import { formatRelativeDate } from '../../lib/date';
 
 interface AtomCardProps {
-  atom: AtomWithTags;
+  atom: DisplayAtom;
   onAtomClick: (atomId: string) => void;
   viewMode: 'grid' | 'list';
   matchingChunkContent?: string;  // For search results
@@ -17,8 +17,8 @@ function ProcessingStatusIndicator({
   taggingStatus,
   onRetry,
 }: {
-  embeddingStatus: AtomWithTags['embedding_status'];
-  taggingStatus: AtomWithTags['tagging_status'];
+  embeddingStatus: DisplayAtom['embedding_status'];
+  taggingStatus: DisplayAtom['tagging_status'];
   onRetry?: () => void;
 }) {
   // Show failed state if embedding failed
@@ -93,7 +93,12 @@ export const AtomCard = memo(function AtomCard({
 }: AtomCardProps) {
   const handleClick = () => onAtomClick(atom.id);
   const handleRetry = onRetryEmbedding ? () => onRetryEmbedding(atom.id) : undefined;
-  const { title, snippet } = extractTitleAndSnippet(atom.content, 120);
+
+  // Use snippet for summaries, extractTitleAndSnippet for full atoms (search results)
+  const hasContent = 'content' in atom;
+  const { title, snippet } = hasContent
+    ? extractTitleAndSnippet((atom as any).content, 120)
+    : { title: (atom as AtomSummary).snippet, snippet: '' };
 
   const maxVisibleTags = viewMode === 'grid' ? 2 : 3;
   const visibleTags = atom.tags.slice(0, maxVisibleTags);
@@ -186,4 +191,3 @@ export const AtomCard = memo(function AtomCard({
     && prev.viewMode === next.viewMode
     && prev.matchingChunkContent === next.matchingChunkContent;
 });
-

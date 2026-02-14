@@ -1,70 +1,56 @@
-//! Utility commands (database verification, tag compaction, MCP bridge)
+//! Utility commands (sqlite-vec check, tag compaction, MCP bridge)
 
-use crate::compaction;
-use crate::db::Database;
-use crate::providers::{
-    fetch_and_return_capabilities, get_cached_capabilities_sync, save_capabilities_cache,
-    ProviderConfig, ProviderType,
-};
-use crate::settings;
+use atomic_core::AtomicCore;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 #[tauri::command]
-pub fn check_sqlite_vec(db: State<Database>) -> Result<String, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-
-    let version: String = conn
-        .query_row("SELECT vec_version()", [], |row| row.get(0))
-        .map_err(|e| format!("sqlite-vec not loaded: {}", e))?;
-
-    Ok(version)
+pub fn check_sqlite_vec(core: State<AtomicCore>) -> Result<String, String> {
+    core.check_sqlite_vec().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn compact_tags(
     app_handle: AppHandle,
-    db: State<'_, Database>,
-) -> Result<compaction::CompactionResult, String> {
+    core: State<'_, AtomicCore>,
+) -> Result<atomic_core::compaction::CompactionResult, String> {
     let _ = app_handle.emit("tags-compaction-start", serde_json::json!({}));
 
-    let mut result = compaction::CompactionResult {
+    let mut result = atomic_core::compaction::CompactionResult {
         tags_merged: 0,
         atoms_retagged: 0,
     };
 
+    let db = core.database();
+
     let (provider_config, model) = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let settings_map = settings::get_all_settings(&conn)?;
-        let provider_config = ProviderConfig::from_settings(&settings_map);
+        let settings_map = atomic_core::settings::get_all_settings(&conn).map_err(|e| e.to_string())?;
+        let provider_config = atomic_core::ProviderConfig::from_settings(&settings_map);
 
         match provider_config.provider_type {
-            ProviderType::OpenRouter => {
+            atomic_core::ProviderType::OpenRouter => {
                 if provider_config.openrouter_api_key.is_none() {
                     let _ = app_handle.emit(
                         "tags-compaction-complete",
                         serde_json::json!({"success": false, "error": "OpenRouter API key not configured"}),
                     );
-                    return Err(
-                        "OpenRouter API key not configured. Please set it in Settings.".to_string(),
-                    );
+                    return Err("OpenRouter API key not configured. Please set it in Settings.".to_string());
                 }
             }
-            ProviderType::Ollama => {
+            atomic_core::ProviderType::Ollama => {
                 if provider_config.ollama_host.is_empty() {
                     let _ = app_handle.emit(
                         "tags-compaction-complete",
                         serde_json::json!({"success": false, "error": "Ollama host not configured"}),
                     );
-                    return Err(
-                        "Ollama host not configured. Please set it in Settings.".to_string(),
-                    );
+                    return Err("Ollama host not configured. Please set it in Settings.".to_string());
                 }
             }
         }
 
         let model = match provider_config.provider_type {
-            ProviderType::Ollama => provider_config.llm_model().to_string(),
-            ProviderType::OpenRouter => settings_map
+            atomic_core::ProviderType::Ollama => provider_config.llm_model().to_string(),
+            atomic_core::ProviderType::OpenRouter => settings_map
                 .get("tagging_model")
                 .cloned()
                 .unwrap_or_else(|| "openai/gpt-4o-mini".to_string()),
@@ -74,7 +60,11 @@ pub async fn compact_tags(
     };
 
     let supported_params: Option<Vec<String>> =
-        if provider_config.provider_type == ProviderType::OpenRouter {
+        if provider_config.provider_type == atomic_core::ProviderType::OpenRouter {
+            use atomic_core::providers::models::{
+                fetch_and_return_capabilities, get_cached_capabilities_sync, save_capabilities_cache,
+            };
+
             let client = reqwest::Client::new();
 
             let (cached, is_stale) = {
@@ -110,13 +100,12 @@ pub async fn compact_tags(
 
     eprintln!("=== Tag Merging ===");
 
-    let all_tags = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        compaction::read_all_tags(&conn)?
-    };
+    let all_tags = core
+        .get_tags_for_compaction()
+        .map_err(|e| e.to_string())?;
 
     if all_tags != "(no existing tags)" {
-        match compaction::fetch_merge_suggestions(
+        match atomic_core::compaction::fetch_merge_suggestions(
             &provider_config,
             &all_tags,
             &model,
@@ -125,21 +114,11 @@ pub async fn compact_tags(
         .await
         {
             Ok(merge_suggestions) => {
-                eprintln!(
-                    "Received {} merge suggestions",
-                    merge_suggestions.merges.len()
-                );
-
-                let (merged, retagged, errors) = {
-                    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-                    compaction::apply_merge_operations(&conn, &merge_suggestions.merges)
-                };
-
-                result.tags_merged = merged;
-                result.atoms_retagged = retagged;
-                for err in errors {
-                    eprintln!("{}", err);
-                }
+                eprintln!("Received {} merge suggestions", merge_suggestions.merges.len());
+                let merge_result = core
+                    .apply_tag_merges(&merge_suggestions.merges)
+                    .map_err(|e| e.to_string())?;
+                result = merge_result;
             }
             Err(e) => {
                 eprintln!("Merge phase failed: {}", e);
@@ -166,23 +145,18 @@ pub async fn compact_tags(
     Ok(result)
 }
 
-/// Get the path to the bundled MCP server binary
 #[tauri::command]
 pub fn get_mcp_bridge_path(app_handle: AppHandle) -> Result<String, String> {
     let path = app_handle
         .path()
         .resolve("binaries/atomic-mcp", tauri::path::BaseDirectory::Resource)
         .map_err(|e| format!("Failed to resolve MCP server path: {}", e))?;
-
-    // The sidecar binary gets a platform-specific suffix added by Tauri
     Ok(path.to_string_lossy().to_string())
 }
 
-/// Get MCP configuration snippet for Claude Desktop
 #[tauri::command]
 pub fn get_mcp_config(app_handle: AppHandle) -> Result<serde_json::Value, String> {
     let mcp_path = get_mcp_bridge_path(app_handle)?;
-
     Ok(serde_json::json!({
         "mcpServers": {
             "atomic": {

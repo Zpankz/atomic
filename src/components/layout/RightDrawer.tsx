@@ -88,12 +88,18 @@ export function RightDrawer() {
     }
   }, [mode, atomId]);
 
-  // Update local atom state when the store atom changes (e.g., after tag extraction)
+  // Re-fetch full atom when the store summary changes (e.g., after tag extraction)
+  const storeAtomUpdatedAt = storeAtom?.updated_at;
   useEffect(() => {
-    if (mode === 'viewer' && atomId && storeAtom && !isLoadingAtom) {
-      setAtom(storeAtom);
+    if (mode === 'viewer' && atomId && storeAtomUpdatedAt && !isLoadingAtom) {
+      // Store has summaries now, so re-fetch the full atom to get updated tags/content
+      getTransport().invoke<AtomWithTags | null>('get_atom_by_id', { id: atomId })
+        .then((fetchedAtom) => {
+          if (fetchedAtom) setAtom(fetchedAtom);
+        })
+        .catch(() => {});
     }
-  }, [mode, atomId, storeAtom, isLoadingAtom]);
+  }, [mode, atomId, storeAtomUpdatedAt, isLoadingAtom]);
 
   // Close on click outside
   useClickOutside(drawerRef, closeDrawer, isOpen);
