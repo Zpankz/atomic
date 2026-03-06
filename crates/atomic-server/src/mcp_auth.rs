@@ -97,7 +97,7 @@ where
         };
 
         // Verify token
-        let token_info = match state.core.verify_api_token(&raw_token) {
+        let token_info = match state.manager.registry().verify_api_token(&raw_token) {
             Ok(Some(info)) => info,
             _ => {
                 return Box::pin(async move {
@@ -112,9 +112,9 @@ where
 
         // Fire-and-forget last_used_at update
         let token_id = token_info.id.clone();
-        let state_for_update = state.clone();
+        let registry = state.manager.registry().clone();
         tokio::task::spawn_blocking(move || {
-            let _ = state_for_update.core.update_token_last_used(&token_id);
+            let _ = registry.update_token_last_used(&token_id);
         });
 
         let fut = self.service.call(req);
@@ -137,12 +137,14 @@ mod tests {
     }
 
     fn test_state(public_url: Option<&str>) -> (web::Data<AppState>, String) {
-        let temp = tempfile::NamedTempFile::new().unwrap();
-        let core = atomic_core::AtomicCore::open_or_create(temp.path()).unwrap();
-        let (_, raw_token) = core.create_api_token("test-token").unwrap();
+        let temp = tempfile::TempDir::new().unwrap();
+        let manager = std::sync::Arc::new(
+            atomic_core::DatabaseManager::new(temp.path()).unwrap()
+        );
+        let (_, raw_token) = manager.registry().create_api_token("test-token").unwrap();
         let (event_tx, _) = broadcast::channel::<ServerEvent>(16);
         let state = web::Data::new(AppState {
-            core,
+            manager,
             event_tx,
             public_url: public_url.map(String::from),
         });
@@ -231,8 +233,8 @@ mod tests {
     async fn test_revoked_token_returns_401() {
         let (state, raw_token) = test_state(Some("https://atomic.example.com"));
 
-        let tokens = state.core.list_api_tokens().unwrap();
-        state.core.revoke_api_token(&tokens[0].id).unwrap();
+        let tokens = state.manager.registry().list_api_tokens().unwrap();
+        state.manager.registry().revoke_api_token(&tokens[0].id).unwrap();
 
         let app = actix_test::init_service(
             App::new().service(

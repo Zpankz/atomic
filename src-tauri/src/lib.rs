@@ -31,8 +31,8 @@ fn get_local_server_config(
 }
 
 /// Read or create the local server auth token.
-/// This is the ONLY remaining use of atomic-core in the Tauri crate.
-fn ensure_local_token(app_data_dir: &std::path::Path, db_path: &std::path::Path) -> String {
+/// Uses the registry (shared across databases) for token management.
+fn ensure_local_token(app_data_dir: &std::path::Path) -> String {
     let token_file = app_data_dir.join("local_server_token");
 
     // Try to read existing token
@@ -43,11 +43,12 @@ fn ensure_local_token(app_data_dir: &std::path::Path, db_path: &std::path::Path)
         }
     }
 
-    // Create a new token via atomic-core
-    let core = atomic_core::AtomicCore::open_or_create(db_path)
-        .expect("Failed to open database for token bootstrap");
+    // Create a new token via the DatabaseManager (opens registry + default db)
+    let manager = atomic_core::DatabaseManager::new(app_data_dir)
+        .expect("Failed to open database manager for token bootstrap");
 
-    let (_info, raw_token) = core
+    let (_info, raw_token) = manager
+        .registry()
         .create_api_token("desktop")
         .expect("Failed to create API token");
 
@@ -72,15 +73,10 @@ pub fn run() {
             std::fs::create_dir_all(&app_data_dir)
                 .expect("Failed to create app data directory");
 
-            let db_name = std::env::var("ATOMIC_DB_NAME")
-                .map(|name| format!("{}.db", name))
-                .unwrap_or_else(|_| "atomic.db".to_string());
+            eprintln!("Data directory: {:?}", app_data_dir);
 
-            let db_path = app_data_dir.join(&db_name);
-            eprintln!("Using database: {:?}", db_path);
-
-            // Bootstrap auth token (only use of atomic-core)
-            let auth_token = ensure_local_token(&app_data_dir, &db_path);
+            // Bootstrap auth token (opens registry/manager)
+            let auth_token = ensure_local_token(&app_data_dir);
 
             let base_url = format!("http://127.0.0.1:{}", SIDECAR_PORT);
             let config = LocalServerConfig {
@@ -109,8 +105,8 @@ pub fn run() {
                     .sidecar("atomic-server")
                     .expect("Failed to create sidecar command")
                     .args([
-                        "--db-path",
-                        db_path.to_str().unwrap(),
+                        "--data-dir",
+                        app_data_dir.to_str().unwrap(),
                         "serve",
                         "--port",
                         &SIDECAR_PORT.to_string(),

@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { TagTree } from '../tags/TagTree';
 import { SettingsButton, SettingsModal } from '../settings';
+import { DatabaseSwitcher } from '../DatabaseSwitcher';
 import { useUIStore } from '../../stores/ui';
 
 const COLLAPSE_BREAKPOINT = 768;
@@ -50,15 +51,15 @@ export function LeftPanel() {
       <aside
         ref={panelRef}
         className={`
-          w-[250px] h-full bg-[var(--color-bg-panel)]/80 border-r border-[var(--color-border)] flex flex-col transition-all duration-200 backdrop-blur-xl
+          w-[250px] h-full bg-[var(--color-bg-panel)]/80 border-r border-[var(--color-border)] flex flex-col transition-all duration-200 backdrop-blur-xl z-10
           max-md:fixed max-md:top-0 max-md:left-0 max-md:z-40 max-md:shadow-2xl
           ${leftPanelOpen ? 'max-md:translate-x-0' : 'max-md:-translate-x-full'}
           ${leftPanelOpen ? '' : 'hidden md:flex'}
         `}
       >
         {/* Titlebar row with settings button */}
-        <div className="h-[52px] flex items-center justify-end px-3 flex-shrink-0">
-          <div data-tauri-drag-region className="flex-1 h-full drag-region" />
+        <div className="h-[52px] flex items-center px-3 flex-shrink-0 gap-1" data-tauri-drag-region>
+          <DatabaseSwitcher />
           <SettingsButton onClick={() => setIsSettingsOpen(true)} />
         </div>
 

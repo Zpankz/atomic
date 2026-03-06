@@ -37,8 +37,10 @@ pub struct TagLookupResult {
 
 /// Cached tag tree to avoid re-querying the DB for every atom during bulk processing.
 /// Refreshes every 30 seconds or when explicitly invalidated.
+/// Keyed by database path to avoid cross-database cache pollution.
 struct TagTreeCache {
     tree_json: String,
+    db_path: String,
     fetched_at: std::time::Instant,
 }
 
@@ -48,13 +50,14 @@ static TAG_TREE_CACHE: LazyLock<Mutex<Option<TagTreeCache>>> = LazyLock::new(|| 
 
 /// Get the tag tree JSON, using a time-based cache to avoid redundant DB queries.
 /// Falls back to a fresh query if the cache is stale or missing.
-pub fn get_tag_tree_cached(conn: &Connection) -> Result<String, String> {
+/// The `db_path` parameter keys the cache to avoid serving stale data across databases.
+pub fn get_tag_tree_cached(conn: &Connection, db_path: &str) -> Result<String, String> {
     let now = std::time::Instant::now();
 
-    // Check cache
+    // Check cache — must match both TTL and database path
     if let Ok(cache) = TAG_TREE_CACHE.lock() {
         if let Some(ref entry) = *cache {
-            if now.duration_since(entry.fetched_at) < TAG_TREE_CACHE_TTL {
+            if entry.db_path == db_path && now.duration_since(entry.fetched_at) < TAG_TREE_CACHE_TTL {
                 return Ok(entry.tree_json.clone());
             }
         }
@@ -66,6 +69,7 @@ pub fn get_tag_tree_cached(conn: &Connection) -> Result<String, String> {
     if let Ok(mut cache) = TAG_TREE_CACHE.lock() {
         *cache = Some(TagTreeCache {
             tree_json: tree_json.clone(),
+            db_path: db_path.to_string(),
             fetched_at: now,
         });
     }

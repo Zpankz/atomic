@@ -42,8 +42,10 @@ pub mod executor;
 pub mod extraction;
 pub mod ingest;
 pub mod import;
+pub mod manager;
 pub mod models;
 pub mod providers;
+pub mod registry;
 pub mod search;
 pub mod settings;
 pub mod tokens;
@@ -60,6 +62,8 @@ pub use search::{SearchMode, SearchOptions};
 pub use tokens::ApiTokenInfo;
 pub use import::{ImportProgress, ImportResult};
 pub use ingest::{IngestionEvent, IngestionRequest, IngestionResult, FeedPollResult};
+pub use manager::DatabaseManager;
+pub use registry::{DatabaseInfo, Registry};
 
 use chrono::Utc;
 use rusqlite::Connection;
@@ -90,19 +94,31 @@ pub struct UpdateAtomRequest {
 #[derive(Clone)]
 pub struct AtomicCore {
     db: Arc<Database>,
+    /// When present, settings and token operations delegate to the shared registry.
+    /// When absent (standalone use, tests), uses per-db tables as before.
+    registry: Option<Arc<registry::Registry>>,
 }
 
 impl AtomicCore {
     /// Open an existing database
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self, AtomicCoreError> {
         let db = Database::open(db_path)?;
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self { db: Arc::new(db), registry: None })
     }
 
     /// Open an existing database with a larger read pool sized for server workloads.
     pub fn open_for_server(db_path: impl AsRef<Path>) -> Result<Self, AtomicCoreError> {
         let db = Database::open_for_server(db_path)?;
-        Self::seed_and_backfill(db)
+        Self::seed_and_backfill(db, None)
+    }
+
+    /// Open for server with an optional shared registry for settings/token delegation.
+    pub fn open_for_server_with_registry(
+        db_path: impl AsRef<Path>,
+        registry: Option<Arc<registry::Registry>>,
+    ) -> Result<Self, AtomicCoreError> {
+        let db = Database::open_for_server(db_path)?;
+        Self::seed_and_backfill(db, registry)
     }
 
     /// Run PRAGMA optimize — call on graceful shutdown.
@@ -113,11 +129,11 @@ impl AtomicCore {
     /// Open an existing database or create a new one
     pub fn open_or_create(db_path: impl AsRef<Path>) -> Result<Self, AtomicCoreError> {
         let db = Database::open_or_create(db_path)?;
-        Self::seed_and_backfill(db)
+        Self::seed_and_backfill(db, None)
     }
 
-    /// Shared initialization: seed default tags and backfill centroids.
-    fn seed_and_backfill(db: Database) -> Result<Self, AtomicCoreError> {
+    /// Shared initialization: seed default tags, reconcile vec dimension, backfill centroids.
+    fn seed_and_backfill(db: Database, registry: Option<Arc<registry::Registry>>) -> Result<Self, AtomicCoreError> {
         // Seed default category tags if tags table is empty
         {
             let conn = db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
@@ -132,6 +148,46 @@ impl AtomicCore {
                         "INSERT OR IGNORE INTO tags (id, name, parent_id, created_at) VALUES (?1, ?2, NULL, ?3)",
                         rusqlite::params![&id, category, &now],
                     )?;
+                }
+            }
+        }
+
+        // Reconcile vec_chunks dimension with the configured embedding model.
+        // Only for empty databases (no atoms yet) — e.g. newly created databases
+        // whose migration hardcodes float[1536] but the user's model differs.
+        if let Some(ref reg) = registry {
+            let conn = db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+            let atom_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM atoms", [], |row| row.get(0))
+                .unwrap_or(0);
+
+            if atom_count == 0 {
+                if let Ok(settings) = reg.get_all_settings() {
+                    let config = providers::ProviderConfig::from_settings(&settings);
+                    let expected_dim = config.embedding_dimension();
+
+                    let current_dim: usize = conn
+                        .query_row(
+                            "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_chunks'",
+                            [],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .ok()
+                        .and_then(|sql| {
+                            let start = sql.find("float[")?;
+                            let after = &sql[start + 6..];
+                            let end = after.find(']')?;
+                            after[..end].parse::<usize>().ok()
+                        })
+                        .unwrap_or(1536);
+
+                    if current_dim != expected_dim {
+                        eprintln!(
+                            "Reconciling vec_chunks dimension: {} -> {} for configured embedding model",
+                            current_dim, expected_dim
+                        );
+                        db::recreate_vec_chunks_with_dimension(&conn, expected_dim)?;
+                    }
                 }
             }
         }
@@ -178,7 +234,13 @@ impl AtomicCore {
             }
         }
 
-        Ok(Self { db: Arc::new(db) })
+        Ok(Self { db: Arc::new(db), registry })
+    }
+
+    /// Get settings map for passing to background tasks when registry is present.
+    /// Returns Some if registry is available, None if settings should be read from data db.
+    fn settings_for_background(&self) -> Option<HashMap<String, String>> {
+        self.registry.as_ref().and_then(|reg| reg.get_all_settings().ok())
     }
 
     /// Get the database path (for external code to open its own connection)
@@ -193,16 +255,27 @@ impl AtomicCore {
 
     // ==================== Settings ====================
 
-    /// Get all settings
+    /// Get all settings, reading from registry if available.
     pub fn get_settings(
         &self,
     ) -> Result<std::collections::HashMap<String, String>, AtomicCoreError> {
+        if let Some(ref reg) = self.registry {
+            return reg.get_all_settings();
+        }
         let conn = self.db.read_conn()?;
         settings::get_all_settings(&conn)
     }
 
-    /// Set a setting value
+    /// Get all settings as a HashMap. Internal helper used by embedding/agent code.
+    pub fn get_settings_map(&self) -> Result<HashMap<String, String>, AtomicCoreError> {
+        self.get_settings()
+    }
+
+    /// Set a setting value.
     pub fn set_setting(&self, key: &str, value: &str) -> Result<(), AtomicCoreError> {
+        if let Some(ref reg) = self.registry {
+            return reg.set_setting(key, value);
+        }
         let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
         settings::set_setting(&conn, key, value)
     }
@@ -214,12 +287,18 @@ impl AtomicCore {
         &self,
         name: &str,
     ) -> Result<(tokens::ApiTokenInfo, String), AtomicCoreError> {
+        if let Some(ref reg) = self.registry {
+            return reg.create_api_token(name);
+        }
         let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
         tokens::create_token(&conn, name)
     }
 
     /// List all API tokens (metadata only, never includes raw token values).
     pub fn list_api_tokens(&self) -> Result<Vec<tokens::ApiTokenInfo>, AtomicCoreError> {
+        if let Some(ref reg) = self.registry {
+            return reg.list_api_tokens();
+        }
         let conn = self.db.read_conn()?;
         tokens::list_tokens(&conn)
     }
@@ -229,24 +308,36 @@ impl AtomicCore {
         &self,
         raw_token: &str,
     ) -> Result<Option<tokens::ApiTokenInfo>, AtomicCoreError> {
+        if let Some(ref reg) = self.registry {
+            return reg.verify_api_token(raw_token);
+        }
         let conn = self.db.read_conn()?;
         tokens::verify_token(&conn, raw_token)
     }
 
     /// Revoke an API token by ID.
     pub fn revoke_api_token(&self, id: &str) -> Result<(), AtomicCoreError> {
+        if let Some(ref reg) = self.registry {
+            return reg.revoke_api_token(id);
+        }
         let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
         tokens::revoke_token(&conn, id)
     }
 
     /// Update the last_used_at timestamp for a token.
     pub fn update_token_last_used(&self, id: &str) -> Result<(), AtomicCoreError> {
+        if let Some(ref reg) = self.registry {
+            return reg.update_token_last_used(id);
+        }
         let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
         tokens::update_last_used(&conn, id)
     }
 
     /// Migrate legacy server_auth_token from settings to api_tokens table.
     pub fn migrate_legacy_token(&self) -> Result<bool, AtomicCoreError> {
+        if let Some(ref reg) = self.registry {
+            return reg.migrate_legacy_token();
+        }
         let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
         tokens::migrate_legacy_token(&conn)
     }
@@ -255,6 +346,9 @@ impl AtomicCore {
     pub fn ensure_default_token(
         &self,
     ) -> Result<Option<(tokens::ApiTokenInfo, String)>, AtomicCoreError> {
+        if let Some(ref reg) = self.registry {
+            return reg.ensure_default_token();
+        }
         let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
         tokens::ensure_default_token(&conn)
     }
@@ -367,11 +461,12 @@ impl AtomicCore {
         };
 
         // Spawn embedding task (non-blocking)
-        embedding::spawn_embedding_task_single(
+        embedding::spawn_embedding_task_single_with_settings(
             Arc::clone(&self.db),
             id,
             request.content,
             on_event,
+            self.settings_for_background(),
         );
 
         Ok(AtomWithTags { atom, tags })
@@ -519,9 +614,12 @@ impl AtomicCore {
             }
 
             let db_clone = Arc::clone(&self.db);
+            let bg_settings = self.settings_for_background();
             executor::spawn(async move {
-                embedding::process_embedding_batch(db_clone, embedding_pairs, false, on_event)
-                    .await;
+                match bg_settings {
+                    Some(s) => embedding::process_embedding_batch_with_settings(db_clone, embedding_pairs, false, on_event, s).await,
+                    None => embedding::process_embedding_batch(db_clone, embedding_pairs, false, on_event).await,
+                };
             });
         }
 
@@ -591,11 +689,12 @@ impl AtomicCore {
         };
 
         // Spawn embedding task (non-blocking)
-        embedding::spawn_embedding_task_single(
+        embedding::spawn_embedding_task_single_with_settings(
             Arc::clone(&self.db),
             id.to_string(),
             request.content,
             on_event,
+            self.settings_for_background(),
         );
 
         Ok(AtomWithTags { atom, tags })
@@ -1077,7 +1176,7 @@ impl AtomicCore {
         &self,
         options: SearchOptions,
     ) -> Result<Vec<SemanticSearchResult>, AtomicCoreError> {
-        search::search_atoms(&self.db, options)
+        search::search_atoms_with_settings(&self.db, options, self.settings_for_background())
             .await
             .map_err(|e| AtomicCoreError::Search(e))
     }
@@ -1104,7 +1203,7 @@ impl AtomicCore {
     ) -> Result<(wiki::WikiStrategy, wiki::WikiStrategyContext), AtomicCoreError> {
         const MAX_CROSS_LINK_TAGS: usize = 50;
         let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
-        let settings_map = settings::get_all_settings(&conn)?;
+        let settings_map = self.get_settings()?;
         let config = ProviderConfig::from_settings(&settings_map);
         let model = match config.provider_type {
             ProviderType::Ollama => config.llm_model().to_string(),
@@ -1259,8 +1358,12 @@ impl AtomicCore {
     where
         F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
     {
-        embedding::process_pending_embeddings(Arc::clone(&self.db), on_event)
-            .map_err(|e| AtomicCoreError::Embedding(e))
+        match self.settings_for_background() {
+            Some(s) => embedding::process_pending_embeddings_with_settings(Arc::clone(&self.db), on_event, s)
+                .map_err(|e| AtomicCoreError::Embedding(e)),
+            None => embedding::process_pending_embeddings(Arc::clone(&self.db), on_event)
+                .map_err(|e| AtomicCoreError::Embedding(e)),
+        }
     }
 
     /// Reset atoms stuck in 'processing' state back to 'pending'
@@ -1297,11 +1400,12 @@ impl AtomicCore {
             ?
         };
 
-        embedding::spawn_embedding_task_single(
+        embedding::spawn_embedding_task_single_with_settings(
             Arc::clone(&self.db),
             atom_id.to_string(),
             content,
             on_event,
+            self.settings_for_background(),
         );
 
         Ok(())
@@ -1455,9 +1559,15 @@ impl AtomicCore {
     where
         F: Fn(ChatEvent) + Send + Sync,
     {
-        agent::send_chat_message(Arc::clone(&self.db), conversation_id, content, on_event)
-            .await
-            .map_err(|e| AtomicCoreError::DatabaseOperation(e))
+        agent::send_chat_message_with_settings(
+            Arc::clone(&self.db),
+            conversation_id,
+            content,
+            on_event,
+            self.settings_for_background(),
+        )
+        .await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e))
     }
 
     // ==================== Canvas Operations ====================
@@ -1665,8 +1775,12 @@ impl AtomicCore {
 
         if count > 0 {
             let db = Arc::clone(&self.db);
+            let bg_settings = self.settings_for_background();
             executor::spawn(async move {
-                embedding::process_tagging_batch(db, pending_atoms, on_event).await;
+                match bg_settings {
+                    Some(s) => embedding::process_tagging_batch_with_settings(db, pending_atoms, on_event, s).await,
+                    None => embedding::process_tagging_batch(db, pending_atoms, on_event).await,
+                };
             });
         }
 
@@ -1740,9 +1854,17 @@ impl AtomicCore {
             let conn = self.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
 
             if dimension_affecting_keys.contains(&key) {
-                let (will_change, new_dim) = db::will_dimension_change(&conn, key, value);
-                if will_change {
-                    let current_dim = db::get_current_embedding_dimension(&conn);
+                // Use registry settings if available for dimension calculation
+                let current_settings = self.get_settings()?;
+                let current_config = ProviderConfig::from_settings(&current_settings);
+                let current_dim = current_config.embedding_dimension();
+
+                let mut new_settings = current_settings;
+                new_settings.insert(key.to_string(), value.to_string());
+                let new_config = ProviderConfig::from_settings(&new_settings);
+                let new_dim = new_config.embedding_dimension();
+
+                if current_dim != new_dim {
                     eprintln!(
                         "Embedding dimension changing from {} to {} due to {} change - recreating vec_chunks",
                         current_dim, new_dim, key
@@ -1752,7 +1874,12 @@ impl AtomicCore {
                 }
             }
 
-            settings::set_setting(&conn, key, value)?;
+            // Write to registry if present, otherwise to data db
+            if let Some(ref reg) = self.registry {
+                reg.set_setting(key, value)?;
+            } else {
+                settings::set_setting(&conn, key, value)?;
+            }
         }
 
         let mut pending_count = 0i32;
@@ -1780,14 +1907,23 @@ impl AtomicCore {
                 drop(conn);
 
                 let db = Arc::clone(&self.db);
+                let bg_settings = self.settings_for_background();
                 executor::spawn(async move {
-                    embedding::process_embedding_batch(
-                        db,
-                        pending_atoms,
-                        true, // skip tagging - re-embedding only
-                        on_event,
-                    )
-                    .await;
+                    match bg_settings {
+                        Some(s) => embedding::process_embedding_batch_with_settings(
+                            db,
+                            pending_atoms,
+                            true,
+                            on_event,
+                            s,
+                        ).await,
+                        None => embedding::process_embedding_batch(
+                            db,
+                            pending_atoms,
+                            true, // skip tagging - re-embedding only
+                            on_event,
+                        ).await,
+                    };
                 });
             }
         }
@@ -1806,8 +1942,7 @@ impl AtomicCore {
 
     /// Verify that the current provider is properly configured
     pub fn verify_provider_configured(&self) -> Result<bool, AtomicCoreError> {
-        let conn = self.db.read_conn()?;
-        let settings_map = settings::get_all_settings(&conn)?;
+        let settings_map = self.get_settings()?;
         let config = ProviderConfig::from_settings(&settings_map);
 
         match config.provider_type {
@@ -2055,8 +2190,12 @@ impl AtomicCore {
             }
 
             let db_clone = Arc::clone(&self.db);
+            let bg_settings = self.settings_for_background();
             executor::spawn(async move {
-                embedding::process_embedding_batch(db_clone, imported_atoms, false, on_event).await;
+                match bg_settings {
+                    Some(s) => embedding::process_embedding_batch_with_settings(db_clone, imported_atoms, false, on_event, s).await,
+                    None => embedding::process_embedding_batch(db_clone, imported_atoms, false, on_event).await,
+                };
             });
         }
 

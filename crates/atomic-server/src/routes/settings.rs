@@ -1,12 +1,13 @@
 //! Settings routes
 
+use crate::db_extractor::Db;
 use crate::error::blocking_ok;
 use crate::state::AppState;
 use actix_web::{web, HttpResponse};
 use serde::Deserialize;
 
-pub async fn get_settings(state: web::Data<AppState>) -> HttpResponse {
-    let core = state.core.clone();
+pub async fn get_settings(db: Db) -> HttpResponse {
+    let core = db.0;
     blocking_ok(move || core.get_settings()).await
 }
 
@@ -17,6 +18,7 @@ pub struct SetSettingBody {
 
 pub async fn set_setting(
     state: web::Data<AppState>,
+    db: Db,
     path: web::Path<String>,
     body: web::Json<SetSettingBody>,
 ) -> HttpResponse {
@@ -26,7 +28,7 @@ pub async fn set_setting(
     // Handle dimension-affecting settings via set_setting_with_reembed (avoids deadlock)
     let dimension_keys = ["provider", "embedding_model", "ollama_embedding_model"];
     if dimension_keys.contains(&key.as_str()) {
-        let core = state.core.clone();
+        let core = db.0;
         let on_event = crate::event_bridge::embedding_event_callback(state.event_tx.clone());
         match web::block(move || {
             core.set_setting_with_reembed(&key, &value, on_event)
@@ -40,7 +42,7 @@ pub async fn set_setting(
                 .json(serde_json::json!({"error": e.to_string()})),
         }
     } else {
-        let core = state.core.clone();
+        let core = db.0;
         blocking_ok(move || core.set_setting(&key, &value)).await
     }
 }
@@ -84,16 +86,16 @@ pub async fn test_openrouter_connection(
     }
 }
 
-pub async fn get_available_llm_models(state: web::Data<AppState>) -> HttpResponse {
+pub async fn get_available_llm_models(db: Db) -> HttpResponse {
     use atomic_core::providers::models::{
         fetch_and_return_capabilities, get_cached_capabilities_sync, save_capabilities_cache,
     };
 
-    let db = state.core.database();
+    let database = db.0.database();
 
     // Check cache first
     let (cached, is_stale) = {
-        let conn = match db.conn.lock() {
+        let conn = match database.conn.lock() {
             Ok(c) => c,
             Err(e) => {
                 return HttpResponse::InternalServerError()
@@ -117,7 +119,7 @@ pub async fn get_available_llm_models(state: web::Data<AppState>) -> HttpRespons
     let client = reqwest::Client::new();
     match fetch_and_return_capabilities(&client).await {
         Ok(fresh_cache) => {
-            if let Ok(conn) = db.new_connection() {
+            if let Ok(conn) = database.new_connection() {
                 let _ = save_capabilities_cache(&conn, &fresh_cache);
             }
             HttpResponse::Ok().json(fresh_cache.get_models_with_structured_outputs())

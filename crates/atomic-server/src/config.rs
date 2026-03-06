@@ -1,17 +1,42 @@
 //! Server configuration and CLI
 
 use clap::{Parser, Subcommand};
+use std::path::{Path, PathBuf};
 
 /// Standalone HTTP server for the Atomic knowledge base
 #[derive(Parser, Debug)]
 #[command(name = "atomic-server", about = "Atomic knowledge base HTTP server")]
 pub struct Cli {
-    /// Path to the SQLite database file
-    #[arg(long, default_value = "atomic.db", global = true)]
-    pub db_path: String,
+    /// Path to the data directory containing registry.db and databases/
+    #[arg(long, global = true)]
+    pub data_dir: Option<String>,
+
+    /// Path to the SQLite database file (deprecated, use --data-dir)
+    #[arg(long, global = true)]
+    pub db_path: Option<String>,
 
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+impl Cli {
+    /// Resolve the data directory from CLI args.
+    /// Priority: --data-dir > derived from --db-path > current directory
+    pub fn resolve_data_dir(&self) -> PathBuf {
+        if let Some(ref dir) = self.data_dir {
+            return PathBuf::from(dir);
+        }
+        if let Some(ref path) = self.db_path {
+            // Derive data_dir from db_path's parent directory
+            let p = Path::new(path);
+            if let Some(parent) = p.parent() {
+                if !parent.as_os_str().is_empty() {
+                    return parent.to_path_buf();
+                }
+            }
+        }
+        PathBuf::from(".")
+    }
 }
 
 #[derive(Subcommand, Debug)]

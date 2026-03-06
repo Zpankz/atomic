@@ -101,11 +101,12 @@ async fn execute_search_atoms(
     query: &str,
     limit: i32,
     scope_tag_ids: &[String],
+    external_settings: Option<std::collections::HashMap<String, String>>,
 ) -> Result<Vec<SemanticSearchResult>, String> {
     let options = SearchOptions::new(query, SearchMode::Hybrid, limit)
         .with_threshold(0.3)
         .with_scope(scope_tag_ids.to_vec());
-    crate::search::search_atoms(db, options).await
+    crate::search::search_atoms_with_settings(db, options, external_settings).await
 }
 
 fn execute_get_atom(db: &Database, atom_id: &str) -> Result<Option<String>, String> {
@@ -165,6 +166,7 @@ async fn run_agent_loop<F>(
     provider_config: ProviderConfig,
     model: String,
     mut ctx: AgentContext,
+    external_settings: Option<std::collections::HashMap<String, String>>,
 ) -> Result<ChatMessageWithContext, String>
 where
     F: Fn(ChatEvent) + Send + Sync,
@@ -241,7 +243,7 @@ where
                     "search_atoms" => {
                         let query = tool_args["query"].as_str().unwrap_or("");
                         let limit = tool_args["limit"].as_i64().unwrap_or(5) as i32;
-                        match execute_search_atoms(&db, query, limit, &ctx.scope_tag_ids).await {
+                        match execute_search_atoms(&db, query, limit, &ctx.scope_tag_ids, external_settings.clone()).await {
                             Ok(results) => {
                                 let count = results.len() as i32;
                                 for result in results.iter() {
@@ -359,11 +361,32 @@ pub async fn send_chat_message<F>(
 where
     F: Fn(ChatEvent) + Send + Sync,
 {
+    send_chat_message_with_settings(db, conversation_id, content, on_event, None).await
+}
+
+/// Like `send_chat_message` but with externally-provided settings (from registry).
+pub async fn send_chat_message_with_settings<F>(
+    db: Arc<Database>,
+    conversation_id: &str,
+    content: &str,
+    on_event: F,
+    external_settings: Option<std::collections::HashMap<String, String>>,
+) -> Result<ChatMessageWithContext, String>
+where
+    F: Fn(ChatEvent) + Send + Sync,
+{
+    // Resolve settings (from registry if provided, otherwise from data db)
+    let settings_map = match external_settings {
+        Some(s) => s,
+        None => {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            crate::settings::get_all_settings(&conn)
+                .map_err(|e| e.to_string())?
+        }
+    };
+
     // Get provider config and model from settings
     let (provider_config, model) = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let settings_map = crate::settings::get_all_settings(&conn)
-            .map_err(|e| e.to_string())?;
         let provider_config = ProviderConfig::from_settings(&settings_map);
 
         if provider_config.provider_type == ProviderType::OpenRouter
@@ -424,7 +447,7 @@ where
 
     // Run agent loop
     let mut result =
-        run_agent_loop(&on_event, agent_db, provider_config, model, ctx).await?;
+        run_agent_loop(&on_event, agent_db, provider_config, model, ctx, Some(settings_map)).await?;
 
     // Save assistant message
     {

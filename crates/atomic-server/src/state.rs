@@ -1,15 +1,43 @@
 //! Application state and server event types
 
-use atomic_core::AtomicCore;
+use atomic_core::{AtomicCore, DatabaseManager};
 use serde::Serialize;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
 /// Shared application state for all route handlers
 pub struct AppState {
-    pub core: AtomicCore,
+    pub manager: Arc<DatabaseManager>,
     pub event_tx: broadcast::Sender<ServerEvent>,
     /// Public URL for OAuth discovery (set via --public-url CLI flag)
     pub public_url: Option<String>,
+}
+
+impl AppState {
+    /// Resolve which database core to use for a request.
+    /// Checks X-Atomic-Database header, then ?db= query param, then falls back to active.
+    pub fn resolve_core(&self, req: &actix_web::HttpRequest) -> Result<AtomicCore, atomic_core::AtomicCoreError> {
+        // Check X-Atomic-Database header
+        if let Some(db_id) = req.headers().get("X-Atomic-Database")
+            .and_then(|v| v.to_str().ok())
+        {
+            return self.manager.get_core(db_id);
+        }
+
+        // Check ?db= query parameter
+        if let Some(db_id) = req.query_string()
+            .split('&')
+            .find_map(|pair| {
+                let mut parts = pair.splitn(2, '=');
+                if parts.next()? == "db" { parts.next() } else { None }
+            })
+        {
+            return self.manager.get_core(db_id);
+        }
+
+        // Default to active database
+        self.manager.active_core()
+    }
 }
 
 /// Events broadcast to WebSocket clients

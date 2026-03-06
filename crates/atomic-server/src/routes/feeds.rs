@@ -1,5 +1,6 @@
 //! Feed CRUD and polling routes
 
+use crate::db_extractor::Db;
 use crate::error::blocking_ok;
 use crate::event_bridge::{embedding_event_callback, ingestion_event_callback};
 use crate::state::AppState;
@@ -26,19 +27,20 @@ pub struct UpdateFeedRequest {
     pub tag_ids: Option<Vec<String>>,
 }
 
-pub async fn list_feeds(state: web::Data<AppState>) -> HttpResponse {
-    let core = state.core.clone();
+pub async fn list_feeds(db: Db) -> HttpResponse {
+    let core = db.0;
     blocking_ok(move || core.list_feeds()).await
 }
 
-pub async fn get_feed(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn get_feed(db: Db, path: web::Path<String>) -> HttpResponse {
     let id = path.into_inner();
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.get_feed(&id)).await
 }
 
 pub async fn create_feed(
     state: web::Data<AppState>,
+    db: Db,
     body: web::Json<CreateFeedRequest>,
 ) -> HttpResponse {
     let request = atomic_core::CreateFeedRequest {
@@ -50,14 +52,14 @@ pub async fn create_feed(
     let on_ingest = ingestion_event_callback(state.event_tx.clone());
     let on_embed = embedding_event_callback(state.event_tx.clone());
 
-    match state.core.create_feed(request, on_ingest, on_embed).await {
+    match db.0.create_feed(request, on_ingest, on_embed).await {
         Ok(feed) => HttpResponse::Created().json(feed),
         Err(e) => crate::error::error_response(e),
     }
 }
 
 pub async fn update_feed(
-    state: web::Data<AppState>,
+    db: Db,
     path: web::Path<String>,
     body: web::Json<UpdateFeedRequest>,
 ) -> HttpResponse {
@@ -68,13 +70,13 @@ pub async fn update_feed(
         tag_ids: body.tag_ids.clone(),
     };
 
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.update_feed(&id, request)).await
 }
 
-pub async fn delete_feed(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn delete_feed(db: Db, path: web::Path<String>) -> HttpResponse {
     let id = path.into_inner();
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || {
         core.delete_feed(&id)?;
         Ok(serde_json::json!({"deleted": true}))
@@ -82,12 +84,12 @@ pub async fn delete_feed(state: web::Data<AppState>, path: web::Path<String>) ->
     .await
 }
 
-pub async fn poll_feed(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn poll_feed(state: web::Data<AppState>, db: Db, path: web::Path<String>) -> HttpResponse {
     let feed_id = path.into_inner();
     let on_ingest = ingestion_event_callback(state.event_tx.clone());
     let on_embed = embedding_event_callback(state.event_tx.clone());
 
-    match state.core.poll_feed(&feed_id, on_ingest, on_embed).await {
+    match db.0.poll_feed(&feed_id, on_ingest, on_embed).await {
         Ok(result) => HttpResponse::Ok().json(result),
         Err(e) => crate::error::error_response(e),
     }

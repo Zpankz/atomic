@@ -1,6 +1,6 @@
 //! Ollama and provider routes
 
-use crate::state::AppState;
+use crate::db_extractor::Db;
 use actix_web::{web, HttpResponse};
 use serde::Deserialize;
 
@@ -59,8 +59,8 @@ pub async fn get_ollama_llm_models(query: web::Query<OllamaHostQuery>) -> HttpRe
     }
 }
 
-pub async fn verify_provider_configured(state: web::Data<AppState>) -> HttpResponse {
-    let settings = match state.core.get_settings() {
+pub async fn verify_provider_configured(db: Db) -> HttpResponse {
+    let settings = match db.0.get_settings() {
         Ok(s) => s,
         Err(e) => return crate::error::error_response(e),
     };

@@ -1,7 +1,7 @@
 //! Search routes
 
+use crate::db_extractor::Db;
 use crate::error::{blocking_ok, ok_or_error};
-use crate::state::AppState;
 use actix_web::{web, HttpResponse};
 use atomic_core::{SearchMode, SearchOptions};
 use serde::Deserialize;
@@ -14,7 +14,7 @@ pub struct SearchRequest {
     pub threshold: Option<f32>,
 }
 
-pub async fn search(state: web::Data<AppState>, body: web::Json<SearchRequest>) -> HttpResponse {
+pub async fn search(db: Db, body: web::Json<SearchRequest>) -> HttpResponse {
     let req = body.into_inner();
     let mode = match req.mode.as_str() {
         "keyword" => SearchMode::Keyword,
@@ -32,7 +32,7 @@ pub async fn search(state: web::Data<AppState>, body: web::Json<SearchRequest>) 
         options = options.with_threshold(threshold);
     }
 
-    let result = state.core.search(options).await;
+    let result = db.0.search(options).await;
     ok_or_error(result)
 }
 
@@ -43,13 +43,13 @@ pub struct FindSimilarQuery {
 }
 
 pub async fn find_similar(
-    state: web::Data<AppState>,
+    db: Db,
     path: web::Path<String>,
     query: web::Query<FindSimilarQuery>,
 ) -> HttpResponse {
     let atom_id = path.into_inner();
     let limit = query.limit.unwrap_or(10);
     let threshold = query.threshold.unwrap_or(0.7);
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.find_similar(&atom_id, limit, threshold)).await
 }

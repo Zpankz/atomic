@@ -1,5 +1,6 @@
 //! Import routes
 
+use crate::db_extractor::Db;
 use crate::event_bridge::embedding_event_callback;
 use crate::state::{AppState, ServerEvent};
 use actix_web::{web, HttpResponse};
@@ -13,6 +14,7 @@ pub struct ImportObsidianRequest {
 
 pub async fn import_obsidian_vault(
     state: web::Data<AppState>,
+    db: Db,
     body: web::Json<ImportObsidianRequest>,
 ) -> HttpResponse {
     let on_event = embedding_event_callback(state.event_tx.clone());
@@ -26,7 +28,7 @@ pub async fn import_obsidian_vault(
         });
     };
 
-    match state.core.import_obsidian_vault(
+    match db.0.import_obsidian_vault(
         &body.vault_path,
         body.max_notes,
         on_event,

@@ -15,6 +15,7 @@ use crate::providers::traits::EmbeddingConfig;
 use crate::providers::{get_embedding_provider, get_model_capabilities, ProviderConfig, ProviderType};
 use crate::settings;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -223,16 +224,28 @@ pub async fn process_embedding_only(
     atom_id: &str,
     content: &str,
 ) -> Result<(), String> {
-    process_embedding_only_inner(db, atom_id, content, false).await
+    process_embedding_only_inner(db, atom_id, content, false, None).await
+}
+
+/// Process embedding with externally-provided settings (from registry).
+pub async fn process_embedding_only_with_settings(
+    db: &Database,
+    atom_id: &str,
+    content: &str,
+    settings_map: HashMap<String, String>,
+) -> Result<(), String> {
+    process_embedding_only_inner(db, atom_id, content, false, Some(settings_map)).await
 }
 
 /// Inner implementation with edge deferral control.
 /// When `skip_edges` is true, semantic edge computation is deferred (for batch processing).
+/// When `external_settings` is Some, uses those settings instead of reading from the data db.
 async fn process_embedding_only_inner(
     db: &Database,
     atom_id: &str,
     content: &str,
     skip_edges: bool,
+    external_settings: Option<HashMap<String, String>>,
 ) -> Result<(), String> {
     // Scope for initial DB operations
     let (provider_config, chunks) = {
@@ -245,8 +258,11 @@ async fn process_embedding_only_inner(
         )
         .map_err(|e| e.to_string())?;
 
-        // Get settings for embeddings
-        let settings_map = settings::get_all_settings(&conn).map_err(|e| e.to_string())?;
+        // Get settings for embeddings (from registry if provided, otherwise from data db)
+        let settings_map = match external_settings {
+            Some(ref s) => s.clone(),
+            None => settings::get_all_settings(&conn).map_err(|e| e.to_string())?,
+        };
         let provider_config = ProviderConfig::from_settings(&settings_map);
 
         // Validate provider configuration
@@ -380,6 +396,23 @@ pub async fn process_tagging_only(
     db: &Database,
     atom_id: &str,
 ) -> Result<(Vec<String>, Vec<String>), String> {
+    process_tagging_only_inner(db, atom_id, None).await
+}
+
+/// Process tagging with externally-provided settings (from registry).
+pub async fn process_tagging_only_with_settings(
+    db: &Database,
+    atom_id: &str,
+    settings_map: HashMap<String, String>,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    process_tagging_only_inner(db, atom_id, Some(settings_map)).await
+}
+
+async fn process_tagging_only_inner(
+    db: &Database,
+    atom_id: &str,
+    external_settings: Option<HashMap<String, String>>,
+) -> Result<(Vec<String>, Vec<String>), String> {
     // Get settings, validate state, and read raw content
     let (provider_config, tagging_model, content) = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -391,8 +424,11 @@ pub async fn process_tagging_only(
         )
         .map_err(|e| e.to_string())?;
 
-        // Get settings
-        let settings_map = settings::get_all_settings(&conn).map_err(|e| e.to_string())?;
+        // Get settings (from registry if provided, otherwise from data db)
+        let settings_map = match external_settings {
+            Some(ref s) => s.clone(),
+            None => settings::get_all_settings(&conn).map_err(|e| e.to_string())?,
+        };
         let auto_tagging_enabled = settings_map
             .get("auto_tagging_enabled")
             .map(|v| v == "true")
@@ -460,10 +496,10 @@ pub async fn process_tagging_only(
             None
         };
 
-    // Get tag tree (cached to avoid redundant DB queries during bulk processing)
+    // Get tag tree (cached per-database to avoid redundant DB queries during bulk processing)
     let tag_tree_json = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        get_tag_tree_cached(&conn)?
+        get_tag_tree_cached(&conn, db.db_path.to_str().unwrap_or(""))?
     };
 
     // Single LLM call on full content — no per-chunk loop, no consolidation
@@ -518,11 +554,37 @@ pub async fn process_tagging_batch<F>(db: Arc<Database>, atom_ids: Vec<String>, 
 where
     F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
 {
+    process_tagging_batch_inner(db, atom_ids, on_event, None).await
+}
+
+/// Process tagging batch with externally-provided settings (from registry).
+pub async fn process_tagging_batch_with_settings<F>(
+    db: Arc<Database>,
+    atom_ids: Vec<String>,
+    on_event: F,
+    settings_map: HashMap<String, String>,
+)
+where
+    F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
+{
+    process_tagging_batch_inner(db, atom_ids, on_event, Some(settings_map)).await
+}
+
+async fn process_tagging_batch_inner<F>(
+    db: Arc<Database>,
+    atom_ids: Vec<String>,
+    on_event: F,
+    external_settings: Option<HashMap<String, String>>,
+)
+where
+    F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
+{
     let mut tasks = Vec::with_capacity(atom_ids.len());
 
     for atom_id in atom_ids {
         let db = Arc::clone(&db);
         let on_event = on_event.clone();
+        let settings = external_settings.clone();
 
         let task = tokio::spawn(async move {
             // Acquire semaphore permit
@@ -531,7 +593,10 @@ where
                 .await
                 .expect("Semaphore closed unexpectedly");
 
-            let result = process_tagging_only(&db, &atom_id).await;
+            let result = match settings {
+                Some(s) => process_tagging_only_with_settings(&db, &atom_id, s).await,
+                None => process_tagging_only(&db, &atom_id).await,
+            };
 
             let event = match result {
                 Ok((tags_extracted, new_tags_created)) => EmbeddingEvent::TaggingComplete {
@@ -576,6 +641,19 @@ pub fn spawn_embedding_task_single<F>(
 ) where
     F: Fn(EmbeddingEvent) + Send + Sync + 'static,
 {
+    spawn_embedding_task_single_with_settings(db, atom_id, content, on_event, None);
+}
+
+/// Like `spawn_embedding_task_single` but with externally-provided settings (from registry).
+pub fn spawn_embedding_task_single_with_settings<F>(
+    db: Arc<Database>,
+    atom_id: String,
+    content: String,
+    on_event: F,
+    settings_map: Option<HashMap<String, String>>,
+) where
+    F: Fn(EmbeddingEvent) + Send + Sync + 'static,
+{
     let on_event = Arc::new(on_event);
     crate::executor::spawn(async move {
         // Emit started event
@@ -591,9 +669,14 @@ pub fn spawn_embedding_task_single<F>(
         let content_embed = content.clone();
         let on_event_embed = Arc::clone(&on_event);
         let on_event_tag = Arc::clone(&on_event);
+        let settings_embed = settings_map.clone();
+        let settings_tag = settings_map;
 
         let embed_handle = tokio::spawn(async move {
-            let result = process_embedding_only(&db_embed, &atom_id_embed, &content_embed).await;
+            let result = match settings_embed {
+                Some(s) => process_embedding_only_with_settings(&db_embed, &atom_id_embed, &content_embed, s).await,
+                None => process_embedding_only(&db_embed, &atom_id_embed, &content_embed).await,
+            };
             match &result {
                 Ok(()) => {
                     on_event_embed(EmbeddingEvent::EmbeddingComplete {
@@ -616,7 +699,10 @@ pub fn spawn_embedding_task_single<F>(
         });
 
         let tag_handle = tokio::spawn(async move {
-            let result = process_tagging_only(&db_tag, &atom_id_tag).await;
+            let result = match settings_tag {
+                Some(s) => process_tagging_only_with_settings(&db_tag, &atom_id_tag, s).await,
+                None => process_tagging_only(&db_tag, &atom_id_tag).await,
+            };
             match result {
                 Ok((tags_extracted, new_tags_created)) => {
                     on_event_tag(EmbeddingEvent::TaggingComplete {
@@ -656,6 +742,31 @@ pub async fn process_embedding_batch<F>(
 ) where
     F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
 {
+    process_embedding_batch_inner(db, atoms, skip_tagging, on_event, None).await
+}
+
+/// Process embedding batch with externally-provided settings (from registry).
+pub async fn process_embedding_batch_with_settings<F>(
+    db: Arc<Database>,
+    atoms: Vec<(String, String)>,
+    skip_tagging: bool,
+    on_event: F,
+    settings_map: HashMap<String, String>,
+) where
+    F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
+{
+    process_embedding_batch_inner(db, atoms, skip_tagging, on_event, Some(settings_map)).await
+}
+
+async fn process_embedding_batch_inner<F>(
+    db: Arc<Database>,
+    atoms: Vec<(String, String)>,
+    skip_tagging: bool,
+    on_event: F,
+    external_settings: Option<HashMap<String, String>>,
+) where
+    F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
+{
     let total_count = atoms.len();
     if total_count == 0 {
         return;
@@ -668,13 +779,17 @@ pub async fn process_embedding_batch<F>(
 
     // === Phase 1a: Get settings (brief lock) ===
     let provider_config = {
-        let conn = db.conn.lock().expect("DB lock failed");
-
-        let settings_map = match settings::get_all_settings(&conn) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("Failed to get settings: {}", e);
-                return;
+        let settings_map = match external_settings {
+            Some(ref s) => s.clone(),
+            None => {
+                let conn = db.conn.lock().expect("DB lock failed");
+                match settings::get_all_settings(&conn) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("Failed to get settings: {}", e);
+                        return;
+                    }
+                }
             }
         };
         let provider_config = ProviderConfig::from_settings(&settings_map);
@@ -687,7 +802,7 @@ pub async fn process_embedding_batch<F>(
         }
 
         provider_config
-    }; // Lock released
+    };
 
     // === Phase 1b: Clean up old chunks (lock, but no FTS5 scans or chunking) ===
     {
@@ -767,6 +882,7 @@ pub async fn process_embedding_batch<F>(
             let db = Arc::clone(&db);
             let atom_id = atom_id.clone();
             let on_event = on_event.clone();
+            let settings = external_settings.clone();
 
             let task = tokio::spawn(async move {
                 let _permit = crate::executor::LLM_SEMAPHORE
@@ -774,7 +890,10 @@ pub async fn process_embedding_batch<F>(
                     .await
                     .expect("Semaphore closed unexpectedly");
 
-                let result = process_tagging_only(&db, &atom_id).await;
+                let result = match settings {
+                    Some(s) => process_tagging_only_with_settings(&db, &atom_id, s).await,
+                    None => process_tagging_only(&db, &atom_id).await,
+                };
 
                 let event = match result {
                     Ok((tags_extracted, new_tags_created)) => EmbeddingEvent::TaggingComplete {
@@ -1127,6 +1246,29 @@ pub fn process_pending_embeddings<F>(
 where
     F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
 {
+    process_pending_embeddings_inner(db, on_event, None)
+}
+
+/// Process pending embeddings with externally-provided settings (from registry).
+pub fn process_pending_embeddings_with_settings<F>(
+    db: Arc<Database>,
+    on_event: F,
+    settings_map: HashMap<String, String>,
+) -> Result<i32, String>
+where
+    F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
+{
+    process_pending_embeddings_inner(db, on_event, Some(settings_map))
+}
+
+fn process_pending_embeddings_inner<F>(
+    db: Arc<Database>,
+    on_event: F,
+    external_settings: Option<HashMap<String, String>>,
+) -> Result<i32, String>
+where
+    F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
+{
     // Atomically fetch and mark pending atoms as 'processing' in a single statement
     // This prevents race conditions from duplicate calls
     let pending_atoms: Vec<(String, String)> = {
@@ -1151,13 +1293,21 @@ where
     if count > 0 {
         // Process batch asynchronously on the shared background runtime
         crate::executor::spawn(async move {
-            process_embedding_batch(
-                db,
-                pending_atoms,
-                false, // don't skip tagging - normal flow
-                on_event,
-            )
-            .await;
+            match external_settings {
+                Some(s) => process_embedding_batch_with_settings(
+                    db,
+                    pending_atoms,
+                    false,
+                    on_event,
+                    s,
+                ).await,
+                None => process_embedding_batch(
+                    db,
+                    pending_atoms,
+                    false,
+                    on_event,
+                ).await,
+            };
         });
     }
 

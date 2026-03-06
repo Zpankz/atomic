@@ -153,6 +153,7 @@ interface AtomsStore {
   fetchSources: () => Promise<void>;
   hasActiveFilters: () => boolean;
   clearFilters: () => void;
+  reset: () => void;
 }
 
 /** Convert an AtomWithTags (full content) to AtomSummary shape for the store */
@@ -514,4 +515,26 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
       get().fetchAtoms();
     }
   },
+
+  reset: () => set({
+    atoms: [],
+    totalCount: 0,
+    currentOffset: 0,
+    hasMore: true,
+    currentTagFilter: null,
+    isLoadingInitial: false,
+    isLoadingMore: false,
+    error: null,
+    nextCursor: null,
+    nextCursorId: null,
+    searchMode: 'hybrid',
+    semanticSearchQuery: '',
+    semanticSearchResults: null,
+    isSearching: false,
+    sourceFilter: 'all',
+    sourceValue: null,
+    sortBy: 'updated',
+    sortOrder: 'desc',
+    availableSources: [],
+  }),
 }));

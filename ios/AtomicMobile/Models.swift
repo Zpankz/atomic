@@ -137,6 +137,31 @@ struct PendingAtom: Codable, Identifiable, Sendable {
     let createdAt: Date
 }
 
+struct DatabaseInfo: Codable, Identifiable, Sendable {
+    let id: String
+    let name: String
+    let isDefault: Bool
+    let createdAt: String
+    let lastOpenedAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name
+        case isDefault = "is_default"
+        case createdAt = "created_at"
+        case lastOpenedAt = "last_opened_at"
+    }
+}
+
+struct DatabaseListResponse: Codable, Sendable {
+    let databases: [DatabaseInfo]
+    let activeId: String
+
+    enum CodingKeys: String, CodingKey {
+        case databases
+        case activeId = "active_id"
+    }
+}
+
 struct SearchResult: Codable, Identifiable, Sendable {
     let id: String
     let content: String

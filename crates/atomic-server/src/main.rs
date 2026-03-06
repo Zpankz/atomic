@@ -5,6 +5,7 @@
 
 mod auth;
 mod config;
+mod db_extractor;
 mod error;
 mod event_bridge;
 mod mcp;
@@ -33,26 +34,29 @@ async fn health() -> impl Responder {
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let cli = Cli::parse();
+    let data_dir = cli.resolve_data_dir();
 
     match cli.command {
         // Token management subcommands (no server needed)
         Some(Command::Token { action }) => {
-            let core = atomic_core::AtomicCore::open_or_create(&cli.db_path)
-                .expect("Failed to open database");
+            let manager = atomic_core::DatabaseManager::new(&data_dir)
+                .expect("Failed to open database manager");
+            let core = manager.active_core()
+                .expect("Failed to get active database");
             run_token_command(&core, action);
             Ok(())
         }
 
-        // Server mode — use larger read pool
+        // Server mode
         Some(Command::Serve { port, bind, public_url }) => {
-            let core = atomic_core::AtomicCore::open_for_server(&cli.db_path)
-                .expect("Failed to open database");
-            run_server(core, &cli.db_path, port, &bind, public_url).await
+            let manager = atomic_core::DatabaseManager::new(&data_dir)
+                .expect("Failed to open database manager");
+            run_server(manager, &data_dir.display().to_string(), port, &bind, public_url).await
         }
         None => {
-            let core = atomic_core::AtomicCore::open_for_server(&cli.db_path)
-                .expect("Failed to open database");
-            run_server(core, &cli.db_path, 8080, "127.0.0.1", None).await
+            let manager = atomic_core::DatabaseManager::new(&data_dir)
+                .expect("Failed to open database manager");
+            run_server(manager, &data_dir.display().to_string(), 8080, "127.0.0.1", None).await
         }
     }
 }
@@ -117,12 +121,17 @@ fn run_token_command(core: &atomic_core::AtomicCore, action: TokenAction) {
 }
 
 async fn run_server(
-    core: atomic_core::AtomicCore,
-    db_path: &str,
+    manager: atomic_core::DatabaseManager,
+    data_dir: &str,
     port: u16,
     bind: &str,
     public_url: Option<String>,
 ) -> std::io::Result<()> {
+    let manager = Arc::new(manager);
+
+    // Get active core for startup tasks
+    let core = manager.active_core().expect("Failed to get active database");
+
     // Migrate legacy token if present
     match core.migrate_legacy_token() {
         Ok(true) => println!("  Migrated legacy auth token to new token system"),
@@ -150,18 +159,20 @@ async fn run_server(
     let (event_tx, _) = tokio::sync::broadcast::channel(256);
 
     let app_state = web::Data::new(AppState {
-        core: core.clone(),
+        manager: Arc::clone(&manager),
         event_tx: event_tx.clone(),
         public_url: public_url.clone(),
     });
 
     // Create MCP service
-    let mcp_core = core.clone();
+    let mcp_manager = Arc::clone(&manager);
     let mcp_tx = event_tx.clone();
     let mcp_service = StreamableHttpService::builder()
         .service_factory(Arc::new(move || {
+            let core = mcp_manager.active_core()
+                .expect("Failed to get active database for MCP");
             Ok(mcp::AtomicMcpServer::new(
-                mcp_core.clone(),
+                core,
                 mcp_tx.clone(),
             ))
         }))
@@ -171,7 +182,7 @@ async fn run_server(
         .build();
 
     println!("Atomic Server starting...");
-    println!("  Database: {}", db_path);
+    println!("  Data dir: {}", data_dir);
     println!("  Listening: http://{}:{}", bind, port);
     if let Some(ref url) = public_url {
         println!("  Public URL: {}", url);
@@ -184,47 +195,67 @@ async fn run_server(
         bind, port
     );
 
-    // Startup recovery: reset stuck atoms and process any pending work
+    // Startup recovery: reset stuck atoms and process any pending work for ALL databases
     {
-        let on_event = event_bridge::embedding_event_callback(app_state.event_tx.clone());
+        let (databases, _active_id) = manager.list_databases().unwrap_or_default();
+        for db_info in &databases {
+            let db_core = match manager.get_core(&db_info.id) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("  Warning: failed to load database '{}': {}", db_info.name, e);
+                    continue;
+                }
+            };
+            let on_event = event_bridge::embedding_event_callback(app_state.event_tx.clone());
 
-        match app_state.core.reset_stuck_processing() {
-            Ok(count) if count > 0 => println!("  Reset {} atoms stuck in processing state", count),
-            Ok(_) => {}
-            Err(e) => eprintln!("  Warning: failed to reset stuck processing: {}", e),
-        }
+            match db_core.reset_stuck_processing() {
+                Ok(count) if count > 0 => println!("  [{}] Reset {} atoms stuck in processing state", db_info.name, count),
+                Ok(_) => {}
+                Err(e) => eprintln!("  Warning: [{}] failed to reset stuck processing: {}", db_info.name, e),
+            }
 
-        match app_state.core.process_pending_embeddings(on_event.clone()) {
-            Ok(count) if count > 0 => println!("  Processing {} pending embeddings in background", count),
-            Ok(_) => {}
-            Err(e) => eprintln!("  Warning: failed to start pending embeddings: {}", e),
-        }
+            match db_core.process_pending_embeddings(on_event.clone()) {
+                Ok(count) if count > 0 => println!("  [{}] Processing {} pending embeddings in background", db_info.name, count),
+                Ok(_) => {}
+                Err(e) => eprintln!("  Warning: [{}] failed to start pending embeddings: {}", db_info.name, e),
+            }
 
-        match app_state.core.process_pending_tagging(on_event) {
-            Ok(count) if count > 0 => println!("  Processing {} pending tagging operations in background", count),
-            Ok(_) => {}
-            Err(e) => eprintln!("  Warning: failed to start pending tagging: {}", e),
+            match db_core.process_pending_tagging(on_event) {
+                Ok(count) if count > 0 => println!("  [{}] Processing {} pending tagging operations in background", db_info.name, count),
+                Ok(_) => {}
+                Err(e) => eprintln!("  Warning: [{}] failed to start pending tagging: {}", db_info.name, e),
+            }
         }
     }
 
-    // Spawn feed polling scheduler (ticks every 60 seconds)
+    // Spawn feed polling scheduler (ticks every 60 seconds, polls all databases)
     {
-        let poll_core = core.clone();
+        let poll_manager = Arc::clone(&manager);
         let poll_tx = event_tx.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             interval.tick().await; // first tick fires immediately — skip it
             loop {
                 interval.tick().await;
-                let on_ingest = event_bridge::ingestion_event_callback(poll_tx.clone());
-                let on_embed = event_bridge::embedding_event_callback(poll_tx.clone());
-                let results = poll_core.poll_due_feeds(on_ingest, on_embed).await;
-                for r in &results {
-                    if r.new_items > 0 {
-                        eprintln!(
-                            "Feed {}: {} new, {} skipped, {} errors",
-                            r.feed_id, r.new_items, r.skipped, r.errors
-                        );
+                let databases = match poll_manager.list_databases() {
+                    Ok((dbs, _)) => dbs,
+                    Err(_) => continue,
+                };
+                for db_info in &databases {
+                    let db_core = match poll_manager.get_core(&db_info.id) {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    };
+                    let on_ingest = event_bridge::ingestion_event_callback(poll_tx.clone());
+                    let on_embed = event_bridge::embedding_event_callback(poll_tx.clone());
+                    let results = db_core.poll_due_feeds(on_ingest, on_embed).await;
+                    for r in &results {
+                        if r.new_items > 0 {
+                            eprintln!(
+                                "[{}] Feed {}: {} new, {} skipped, {} errors",
+                                db_info.name, r.feed_id, r.new_items, r.skipped, r.errors
+                            );
+                        }
                     }
                 }
             }
@@ -232,7 +263,7 @@ async fn run_server(
     }
 
     let bind_owned = bind.to_string();
-    let shutdown_core = core.clone();
+    let shutdown_manager = Arc::clone(&manager);
 
     HttpServer::new(move || {
         let cors = Cors::permissive();
@@ -292,7 +323,7 @@ async fn run_server(
 
     // Graceful shutdown: update query planner statistics
     println!("Shutting down — running PRAGMA optimize...");
-    shutdown_core.optimize();
+    shutdown_manager.optimize_all();
 
     Ok(())
 }

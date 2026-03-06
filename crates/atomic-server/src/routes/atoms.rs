@@ -1,6 +1,7 @@
 //! Atom and Tag CRUD routes
 
-use crate::error::{blocking_ok, ok_or_error};
+use crate::db_extractor::Db;
+use crate::error::blocking_ok;
 use crate::event_bridge::embedding_event_callback;
 use crate::state::{AppState, ServerEvent};
 use actix_web::{web, HttpResponse};
@@ -22,7 +23,7 @@ pub struct GetAtomsQuery {
 }
 
 pub async fn get_atoms(
-    state: web::Data<AppState>,
+    db: Db,
     query: web::Query<GetAtomsQuery>,
 ) -> HttpResponse {
     let source_filter = match query.source.as_deref() {
@@ -51,18 +52,18 @@ pub async fn get_atoms(
         sort_by,
         sort_order,
     };
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.list_atoms(&params)).await
 }
 
-pub async fn get_source_list(state: web::Data<AppState>) -> HttpResponse {
-    let core = state.core.clone();
+pub async fn get_source_list(db: Db) -> HttpResponse {
+    let core = db.0;
     blocking_ok(move || core.get_source_list()).await
 }
 
-pub async fn get_atom(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn get_atom(db: Db, path: web::Path<String>) -> HttpResponse {
     let id = path.into_inner();
-    let core = state.core.clone();
+    let core = db.0;
     match web::block(move || core.get_atom(&id)).await {
         Ok(Ok(Some(atom))) => HttpResponse::Ok().json(atom),
         Ok(Ok(None)) => HttpResponse::NotFound().json(serde_json::json!({"error": "Atom not found"})),
@@ -82,11 +83,12 @@ pub struct CreateAtomRequest {
 
 pub async fn create_atom(
     state: web::Data<AppState>,
+    db: Db,
     body: web::Json<CreateAtomRequest>,
 ) -> HttpResponse {
     let req = body.into_inner();
     let on_event = embedding_event_callback(state.event_tx.clone());
-    let core = state.core.clone();
+    let core = db.0;
     let event_tx = state.event_tx.clone();
     match web::block(move || {
         core.create_atom(
@@ -110,6 +112,7 @@ pub async fn create_atom(
 
 pub async fn bulk_create_atoms(
     state: web::Data<AppState>,
+    db: Db,
     body: web::Json<Vec<CreateAtomRequest>>,
 ) -> HttpResponse {
     let requests: Vec<atomic_core::CreateAtomRequest> = body
@@ -123,7 +126,7 @@ pub async fn bulk_create_atoms(
         })
         .collect();
     let on_event = embedding_event_callback(state.event_tx.clone());
-    let core = state.core.clone();
+    let core = db.0;
     let event_tx = state.event_tx.clone();
     match web::block(move || core.create_atoms_bulk(requests, on_event)).await {
         Ok(Ok(result)) => {
@@ -148,13 +151,14 @@ pub struct UpdateAtomRequest {
 
 pub async fn update_atom(
     state: web::Data<AppState>,
+    db: Db,
     path: web::Path<String>,
     body: web::Json<UpdateAtomRequest>,
 ) -> HttpResponse {
     let id = path.into_inner();
     let req = body.into_inner();
     let on_event = embedding_event_callback(state.event_tx.clone());
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || {
         core.update_atom(
             &id,
@@ -169,9 +173,9 @@ pub async fn update_atom(
     }).await
 }
 
-pub async fn delete_atom(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn delete_atom(db: Db, path: web::Path<String>) -> HttpResponse {
     let id = path.into_inner();
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.delete_atom(&id)).await
 }
 
@@ -190,16 +194,16 @@ pub struct GetTagChildrenQuery {
 }
 
 pub async fn get_tags(
-    state: web::Data<AppState>,
+    db: Db,
     query: web::Query<GetTagsQuery>,
 ) -> HttpResponse {
     let min_count = query.min_count.unwrap_or(2);
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.get_all_tags_filtered(min_count)).await
 }
 
 pub async fn get_tag_children(
-    state: web::Data<AppState>,
+    db: Db,
     path: web::Path<String>,
     query: web::Query<GetTagChildrenQuery>,
 ) -> HttpResponse {
@@ -207,7 +211,7 @@ pub async fn get_tag_children(
     let min_count = query.min_count.unwrap_or(0);
     let limit = query.limit.unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.get_tag_children(&parent_id, min_count, limit, offset)).await
 }
 
@@ -218,11 +222,11 @@ pub struct CreateTagRequest {
 }
 
 pub async fn create_tag(
-    state: web::Data<AppState>,
+    db: Db,
     body: web::Json<CreateTagRequest>,
 ) -> HttpResponse {
     let req = body.into_inner();
-    let core = state.core.clone();
+    let core = db.0;
     match web::block(move || core.create_tag(&req.name, req.parent_id.as_deref())).await {
         Ok(Ok(tag)) => HttpResponse::Created().json(tag),
         Ok(Err(e)) => crate::error::error_response(e),
@@ -237,23 +241,23 @@ pub struct UpdateTagRequest {
 }
 
 pub async fn update_tag(
-    state: web::Data<AppState>,
+    db: Db,
     path: web::Path<String>,
     body: web::Json<UpdateTagRequest>,
 ) -> HttpResponse {
     let id = path.into_inner();
     let req = body.into_inner();
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.update_tag(&id, &req.name, req.parent_id.as_deref())).await
 }
 
 pub async fn delete_tag(
-    state: web::Data<AppState>,
+    db: Db,
     path: web::Path<String>,
     query: web::Query<std::collections::HashMap<String, String>>,
 ) -> HttpResponse {
     let id = path.into_inner();
     let recursive = query.get("recursive").map(|v| v == "true").unwrap_or(false);
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.delete_tag(&id, recursive)).await
 }

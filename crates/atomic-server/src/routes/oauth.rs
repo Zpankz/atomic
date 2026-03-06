@@ -110,8 +110,7 @@ pub async fn register(
     let redirect_uris_json = serde_json::to_string(&req.redirect_uris).unwrap_or_default();
     let now = chrono::Utc::now().to_rfc3339();
 
-    let db = state.core.database();
-    let conn = match db.new_connection() {
+    let conn = match state.manager.registry().new_connection() {
         Ok(c) => c,
         Err(e) => {
             return HttpResponse::InternalServerError().json(serde_json::json!({
@@ -175,8 +174,7 @@ pub async fn authorize_page(
     }
 
     // Look up client
-    let db = state.core.database();
-    let conn = match db.new_connection() {
+    let conn = match state.manager.registry().new_connection() {
         Ok(c) => c,
         Err(_) => return HttpResponse::InternalServerError().body("Database error"),
     };
@@ -226,7 +224,7 @@ pub async fn authorize_approve(
     }
 
     // Verify the user's API token
-    match state.core.verify_api_token(&f.api_token) {
+    match state.manager.registry().verify_api_token(&f.api_token) {
         Ok(Some(_)) => {}
         _ => {
             return HttpResponse::Ok()
@@ -236,8 +234,7 @@ pub async fn authorize_approve(
     }
 
     // Verify client_id exists and redirect_uri matches
-    let db = state.core.database();
-    let conn = match db.new_connection() {
+    let conn = match state.manager.registry().new_connection() {
         Ok(c) => c,
         Err(_) => return HttpResponse::InternalServerError().body("Database error"),
     };
@@ -353,8 +350,7 @@ pub async fn token(
         })),
     };
 
-    let db = state.core.database();
-    let conn = match db.new_connection() {
+    let conn = match state.manager.registry().new_connection() {
         Ok(c) => c,
         Err(_) => return HttpResponse::InternalServerError().json(serde_json::json!({
             "error": "server_error"
@@ -446,7 +442,7 @@ pub async fn token(
         .unwrap_or_else(|_| "OAuth Client".to_string());
 
     // Create a new Atomic API token
-    let (token_info, raw_token) = match state.core.create_api_token(&format!("OAuth: {}", client_name)) {
+    let (token_info, raw_token) = match state.manager.registry().create_api_token(&format!("OAuth: {}", client_name)) {
         Ok(t) => t,
         Err(e) => return HttpResponse::InternalServerError().json(serde_json::json!({
             "error": "server_error",
@@ -619,11 +615,13 @@ mod tests {
     use tokio::sync::broadcast;
 
     fn test_state_with_oauth() -> web::Data<AppState> {
-        let temp = tempfile::NamedTempFile::new().unwrap();
-        let core = atomic_core::AtomicCore::open_or_create(temp.path()).unwrap();
+        let temp = tempfile::TempDir::new().unwrap();
+        let manager = std::sync::Arc::new(
+            atomic_core::DatabaseManager::new(temp.path()).unwrap()
+        );
         let (event_tx, _) = broadcast::channel::<ServerEvent>(16);
         let state = web::Data::new(AppState {
-            core,
+            manager,
             event_tx,
             public_url: Some("https://atomic.example.com".to_string()),
         });
@@ -632,11 +630,13 @@ mod tests {
     }
 
     fn test_state_without_oauth() -> web::Data<AppState> {
-        let temp = tempfile::NamedTempFile::new().unwrap();
-        let core = atomic_core::AtomicCore::open_or_create(temp.path()).unwrap();
+        let temp = tempfile::TempDir::new().unwrap();
+        let manager = std::sync::Arc::new(
+            atomic_core::DatabaseManager::new(temp.path()).unwrap()
+        );
         let (event_tx, _) = broadcast::channel::<ServerEvent>(16);
         let state = web::Data::new(AppState {
-            core,
+            manager,
             event_tx,
             public_url: None,
         });
@@ -803,8 +803,7 @@ mod tests {
 
     /// Helper: register a client and return (client_id, client_secret)
     fn register_test_client(state: &web::Data<AppState>) -> (String, String) {
-        let db = state.core.database();
-        let conn = db.new_connection().unwrap();
+        let conn = state.manager.registry().new_connection().unwrap();
         let client_id = uuid::Uuid::new_v4().to_string();
         let client_secret = "test-secret-value";
         let secret_hash = hex::encode(Sha256::digest(client_secret.as_bytes()));
@@ -912,7 +911,7 @@ mod tests {
     async fn test_authorize_approve_success_redirects_with_code() {
         let state = test_state_with_oauth();
         let (client_id, _) = register_test_client(&state);
-        let (_, api_token) = state.core.create_api_token("test").unwrap();
+        let (_, api_token) = state.manager.registry().create_api_token("test").unwrap();
 
         let code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
         let code_challenge =
@@ -996,7 +995,7 @@ mod tests {
     async fn test_full_oauth_flow() {
         let state = test_state_with_oauth();
         let (client_id, client_secret) = register_test_client(&state);
-        let (_, api_token) = state.core.create_api_token("test").unwrap();
+        let (_, api_token) = state.manager.registry().create_api_token("test").unwrap();
 
         // Step 1: Generate PKCE pair
         let code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
@@ -1051,7 +1050,7 @@ mod tests {
         assert!(access_token.starts_with("at_"));
 
         // Step 4: Verify the issued token works
-        let verified = state.core.verify_api_token(access_token).unwrap();
+        let verified = state.manager.registry().verify_api_token(access_token).unwrap();
         assert!(verified.is_some());
         let info = verified.unwrap();
         assert!(info.name.contains("OAuth: Test Client"));
@@ -1061,7 +1060,7 @@ mod tests {
     async fn test_code_cannot_be_reused() {
         let state = test_state_with_oauth();
         let (client_id, client_secret) = register_test_client(&state);
-        let (_, api_token) = state.core.create_api_token("test").unwrap();
+        let (_, api_token) = state.manager.registry().create_api_token("test").unwrap();
 
         let code_verifier = "test-verifier-string-for-pkce-flow";
         let code_challenge =
@@ -1125,7 +1124,7 @@ mod tests {
     async fn test_wrong_pkce_verifier_rejected() {
         let state = test_state_with_oauth();
         let (client_id, client_secret) = register_test_client(&state);
-        let (_, api_token) = state.core.create_api_token("test").unwrap();
+        let (_, api_token) = state.manager.registry().create_api_token("test").unwrap();
 
         let code_verifier = "correct-verifier";
         let code_challenge =

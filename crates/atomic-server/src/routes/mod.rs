@@ -5,6 +5,7 @@ mod atoms;
 mod canvas;
 mod chat;
 mod clustering;
+mod databases;
 mod embedding;
 mod feeds;
 mod graph;
@@ -190,6 +191,13 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.route("/auth/tokens", web::post().to(auth::create_token));
     cfg.route("/auth/tokens", web::get().to(auth::list_tokens));
     cfg.route("/auth/tokens/{id}", web::delete().to(auth::revoke_token));
+
+    // Databases
+    cfg.route("/databases", web::get().to(databases::list_databases));
+    cfg.route("/databases", web::post().to(databases::create_database));
+    cfg.route("/databases/{id}", web::put().to(databases::rename_database));
+    cfg.route("/databases/{id}", web::delete().to(databases::delete_database));
+    cfg.route("/databases/{id}/activate", web::put().to(databases::activate_database));
 
     // Import
     cfg.route(

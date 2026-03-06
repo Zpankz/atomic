@@ -1,5 +1,6 @@
 //! URL ingestion routes
 
+use crate::db_extractor::Db;
 use crate::event_bridge::{embedding_event_callback, ingestion_event_callback};
 use crate::state::AppState;
 use actix_web::{web, HttpResponse};
@@ -21,6 +22,7 @@ pub struct IngestUrlsRequest {
 
 pub async fn ingest_url(
     state: web::Data<AppState>,
+    db: Db,
     body: web::Json<IngestUrlRequest>,
 ) -> HttpResponse {
     let request = atomic_core::IngestionRequest {
@@ -33,7 +35,7 @@ pub async fn ingest_url(
     let on_ingest = ingestion_event_callback(state.event_tx.clone());
     let on_embed = embedding_event_callback(state.event_tx.clone());
 
-    match state.core.ingest_url(request, on_ingest, on_embed).await {
+    match db.0.ingest_url(request, on_ingest, on_embed).await {
         Ok(result) => HttpResponse::Ok().json(result),
         Err(e) => crate::error::error_response(e),
     }
@@ -41,6 +43,7 @@ pub async fn ingest_url(
 
 pub async fn ingest_urls(
     state: web::Data<AppState>,
+    db: Db,
     body: web::Json<IngestUrlsRequest>,
 ) -> HttpResponse {
     let requests: Vec<atomic_core::IngestionRequest> = body
@@ -57,7 +60,7 @@ pub async fn ingest_urls(
     let on_ingest = ingestion_event_callback(state.event_tx.clone());
     let on_embed = embedding_event_callback(state.event_tx.clone());
 
-    let results = state.core.ingest_urls(requests, on_ingest, on_embed).await;
+    let results = db.0.ingest_urls(requests, on_ingest, on_embed).await;
 
     let (successes, failures): (Vec<_>, Vec<_>) = results
         .into_iter()

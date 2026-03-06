@@ -117,10 +117,19 @@ fn normalize_bm25_score(score: f64) -> f32 {
 /// Use this when you need multiple chunks per atom (e.g., wiki generation).
 /// For most UI cases, use `search_atoms()` instead.
 pub async fn search_chunks(db: &Database, options: SearchOptions) -> Result<Vec<ChunkResult>, String> {
+    search_chunks_with_settings(db, options, None).await
+}
+
+/// Like `search_chunks` but with externally-provided settings (from registry).
+pub async fn search_chunks_with_settings(
+    db: &Database,
+    options: SearchOptions,
+    external_settings: Option<HashMap<String, String>>,
+) -> Result<Vec<ChunkResult>, String> {
     match options.mode {
         SearchMode::Keyword => search_keyword_chunks(db, &options).await,
-        SearchMode::Semantic => search_semantic_chunks(db, &options).await,
-        SearchMode::Hybrid => search_hybrid_chunks(db, &options).await,
+        SearchMode::Semantic => search_semantic_chunks(db, &options, external_settings).await,
+        SearchMode::Hybrid => search_hybrid_chunks(db, &options, external_settings).await,
     }
 }
 
@@ -132,8 +141,17 @@ pub async fn search_atoms(
     db: &Database,
     options: SearchOptions,
 ) -> Result<Vec<SemanticSearchResult>, String> {
+    search_atoms_with_settings(db, options, None).await
+}
+
+/// Like `search_atoms` but with externally-provided settings (from registry).
+pub async fn search_atoms_with_settings(
+    db: &Database,
+    options: SearchOptions,
+    external_settings: Option<HashMap<String, String>>,
+) -> Result<Vec<SemanticSearchResult>, String> {
     // Get raw chunk results
-    let chunks = search_chunks(db, options.clone()).await?;
+    let chunks = search_chunks_with_settings(db, options.clone(), external_settings).await?;
 
     // Deduplicate by atom_id, keeping highest score per atom
     let mut atom_best: HashMap<String, ChunkResult> = HashMap::new();
@@ -315,11 +333,17 @@ async fn search_keyword_chunks(
 async fn search_semantic_chunks(
     db: &Database,
     options: &SearchOptions,
+    external_settings: Option<HashMap<String, String>>,
 ) -> Result<Vec<ChunkResult>, String> {
     // Get provider config from settings
     let provider_config = {
-        let conn = db.read_conn().map_err(|e| e.to_string())?;
-        let settings_map = get_all_settings(&conn).map_err(|e| e.to_string())?;
+        let settings_map = match external_settings {
+            Some(s) => s,
+            None => {
+                let conn = db.read_conn().map_err(|e| e.to_string())?;
+                get_all_settings(&conn).map_err(|e| e.to_string())?
+            }
+        };
         ProviderConfig::from_settings(&settings_map)
     };
 
@@ -397,12 +421,13 @@ async fn search_semantic_chunks(
 async fn search_hybrid_chunks(
     db: &Database,
     options: &SearchOptions,
+    external_settings: Option<HashMap<String, String>>,
 ) -> Result<Vec<ChunkResult>, String> {
     // Run keyword and semantic searches in parallel — keyword is pure DB,
     // semantic includes an embedding API call, so overlapping saves significant time.
     let (keyword_results, semantic_results) = tokio::join!(
         search_keyword_chunks(db, options),
-        search_semantic_chunks(db, options),
+        search_semantic_chunks(db, options, external_settings),
     );
     let keyword_results = keyword_results?;
     let semantic_results = semantic_results?;

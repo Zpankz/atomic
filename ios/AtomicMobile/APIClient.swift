@@ -4,10 +4,14 @@ import Foundation
 final class APIClient: Sendable {
     let baseURL: URL
     let token: String
+    /// Optional database ID to scope requests via X-Atomic-Database header.
+    /// When nil, the server uses its active/default database.
+    var databaseId: String?
 
-    init(baseURL: URL, token: String) {
+    init(baseURL: URL, token: String, databaseId: String? = nil) {
         self.baseURL = baseURL
         self.token = token
+        self.databaseId = databaseId
     }
 
     private func request(_ path: String, method: String = "GET", body: (any Encodable & Sendable)? = nil) async throws -> Data {
@@ -18,6 +22,9 @@ final class APIClient: Sendable {
         req.httpMethod = method
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let databaseId {
+            req.setValue(databaseId, forHTTPHeaderField: "X-Atomic-Database")
+        }
 
         if let body {
             req.httpBody = try JSONEncoder().encode(body)
@@ -96,6 +103,17 @@ final class APIClient: Sendable {
         let body = SearchRequest(query: query, mode: mode, limit: limit, threshold: nil)
         let data = try await request("/api/search", method: "POST", body: body)
         return try decode([SearchResult].self, from: data)
+    }
+
+    // MARK: - Databases
+
+    func listDatabases() async throws -> DatabaseListResponse {
+        let data = try await request("/api/databases")
+        return try decode(DatabaseListResponse.self, from: data)
+    }
+
+    func activateDatabase(id: String) async throws {
+        _ = try await request("/api/databases/\(id)/activate", method: "PUT")
     }
 }
 

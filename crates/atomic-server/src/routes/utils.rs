@@ -1,11 +1,11 @@
 //! Utility routes
 
-use crate::state::AppState;
-use actix_web::{web, HttpResponse};
+use crate::db_extractor::Db;
+use actix_web::HttpResponse;
 
-pub async fn check_sqlite_vec(state: web::Data<AppState>) -> HttpResponse {
-    let db = state.core.database();
-    let conn = match db.conn.lock() {
+pub async fn check_sqlite_vec(db: Db) -> HttpResponse {
+    let database = db.0.database();
+    let conn = match database.conn.lock() {
         Ok(c) => c,
         Err(e) => {
             return HttpResponse::InternalServerError()
@@ -20,18 +20,11 @@ pub async fn check_sqlite_vec(state: web::Data<AppState>) -> HttpResponse {
     }
 }
 
-pub async fn compact_tags(state: web::Data<AppState>) -> HttpResponse {
-    let db = state.core.database();
+pub async fn compact_tags(db: Db) -> HttpResponse {
+    let database = db.0.database();
 
     let (provider_config, model) = {
-        let conn = match db.conn.lock() {
-            Ok(c) => c,
-            Err(e) => {
-                return HttpResponse::InternalServerError()
-                    .json(serde_json::json!({"error": e.to_string()}));
-            }
-        };
-        let settings_map = match atomic_core::settings::get_all_settings(&conn) {
+        let settings_map = match db.0.get_settings() {
             Ok(s) => s,
             Err(e) => {
                 return HttpResponse::InternalServerError()
@@ -57,7 +50,7 @@ pub async fn compact_tags(state: web::Data<AppState>) -> HttpResponse {
             };
 
             let (cached, is_stale) = {
-                let conn = match db.conn.lock() {
+                let conn = match database.conn.lock() {
                     Ok(c) => c,
                     Err(_) => return HttpResponse::InternalServerError().finish(),
                 };
@@ -75,7 +68,7 @@ pub async fn compact_tags(state: web::Data<AppState>) -> HttpResponse {
                 let client = reqwest::Client::new();
                 match fetch_and_return_capabilities(&client).await {
                     Ok(fresh) => {
-                        if let Ok(conn) = db.new_connection() {
+                        if let Ok(conn) = database.new_connection() {
                             let _ = save_capabilities_cache(&conn, &fresh);
                         }
                         fresh
@@ -92,7 +85,7 @@ pub async fn compact_tags(state: web::Data<AppState>) -> HttpResponse {
         };
 
     let all_tags = {
-        let conn = match db.conn.lock() {
+        let conn = match database.conn.lock() {
             Ok(c) => c,
             Err(e) => {
                 return HttpResponse::InternalServerError()
@@ -124,7 +117,7 @@ pub async fn compact_tags(state: web::Data<AppState>) -> HttpResponse {
     .await
     {
         Ok(merge_suggestions) => {
-            let conn = match db.conn.lock() {
+            let conn = match database.conn.lock() {
                 Ok(c) => c,
                 Err(e) => {
                     return HttpResponse::InternalServerError()

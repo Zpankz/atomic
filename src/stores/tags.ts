@@ -40,6 +40,7 @@ interface TagsStore {
   deleteTag: (id: string, recursive?: boolean) => Promise<void>;
   compactTags: () => Promise<CompactionResult>;
   clearError: () => void;
+  reset: () => void;
 }
 
 function replaceChildrenInTree(
@@ -202,4 +203,11 @@ export const useTagsStore = create<TagsStore>((set, get) => ({
   },
 
   clearError: () => set({ error: null }),
+
+  reset: () => set({
+    tags: [],
+    isLoading: false,
+    isCompacting: false,
+    error: null,
+  }),
 }));

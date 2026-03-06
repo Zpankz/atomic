@@ -1,13 +1,13 @@
 //! Wiki article routes
 
-use crate::error::{blocking_ok, ok_or_error};
-use crate::state::AppState;
+use crate::db_extractor::Db;
+use crate::error::blocking_ok;
 use actix_web::{web, HttpResponse};
 use serde::Deserialize;
 
-pub async fn get_all_wiki_articles(state: web::Data<AppState>) -> HttpResponse {
-    let db = state.core.database();
-    let conn = match db.conn.lock() {
+pub async fn get_all_wiki_articles(db: Db) -> HttpResponse {
+    let database = db.0.database();
+    let conn = match database.conn.lock() {
         Ok(c) => c,
         Err(e) => {
             return HttpResponse::InternalServerError()
@@ -21,15 +21,15 @@ pub async fn get_all_wiki_articles(state: web::Data<AppState>) -> HttpResponse {
     }
 }
 
-pub async fn get_wiki(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn get_wiki(db: Db, path: web::Path<String>) -> HttpResponse {
     let tag_id = path.into_inner();
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.get_wiki(&tag_id)).await
 }
 
-pub async fn get_wiki_status(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn get_wiki_status(db: Db, path: web::Path<String>) -> HttpResponse {
     let tag_id = path.into_inner();
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.get_wiki_status(&tag_id)).await
 }
 
@@ -39,32 +39,32 @@ pub struct GenerateWikiBody {
 }
 
 pub async fn generate_wiki(
-    state: web::Data<AppState>,
+    db: Db,
     path: web::Path<String>,
     body: web::Json<GenerateWikiBody>,
 ) -> HttpResponse {
     let tag_id = path.into_inner();
-    match state.core.generate_wiki(&tag_id, &body.tag_name).await {
+    match db.0.generate_wiki(&tag_id, &body.tag_name).await {
         Ok(article) => HttpResponse::Ok().json(article),
         Err(e) => crate::error::error_response(e),
     }
 }
 
 pub async fn update_wiki(
-    state: web::Data<AppState>,
+    db: Db,
     path: web::Path<String>,
     body: web::Json<GenerateWikiBody>,
 ) -> HttpResponse {
     let tag_id = path.into_inner();
-    match state.core.update_wiki(&tag_id, &body.tag_name).await {
+    match db.0.update_wiki(&tag_id, &body.tag_name).await {
         Ok(article) => HttpResponse::Ok().json(article),
         Err(e) => crate::error::error_response(e),
     }
 }
 
-pub async fn delete_wiki(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn delete_wiki(db: Db, path: web::Path<String>) -> HttpResponse {
     let tag_id = path.into_inner();
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.delete_wiki(&tag_id)).await
 }
 
@@ -74,19 +74,19 @@ pub struct RelatedTagsQuery {
 }
 
 pub async fn get_related_tags(
-    state: web::Data<AppState>,
+    db: Db,
     path: web::Path<String>,
     query: web::Query<RelatedTagsQuery>,
 ) -> HttpResponse {
     let tag_id = path.into_inner();
     let limit = query.limit.unwrap_or(10);
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.get_related_tags(&tag_id, limit)).await
 }
 
-pub async fn get_wiki_links(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn get_wiki_links(db: Db, path: web::Path<String>) -> HttpResponse {
     let tag_id = path.into_inner();
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.get_wiki_links(&tag_id)).await
 }
 
@@ -96,28 +96,28 @@ pub struct SuggestionsQuery {
 }
 
 pub async fn get_wiki_suggestions(
-    state: web::Data<AppState>,
+    db: Db,
     query: web::Query<SuggestionsQuery>,
 ) -> HttpResponse {
     let limit = query.limit.unwrap_or(10);
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.get_suggested_wiki_articles(limit)).await
 }
 
-pub async fn list_wiki_versions(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn list_wiki_versions(db: Db, path: web::Path<String>) -> HttpResponse {
     let tag_id = path.into_inner();
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.list_wiki_versions(&tag_id)).await
 }
 
-pub async fn get_wiki_version(state: web::Data<AppState>, path: web::Path<String>) -> HttpResponse {
+pub async fn get_wiki_version(db: Db, path: web::Path<String>) -> HttpResponse {
     let version_id = path.into_inner();
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.get_wiki_version(&version_id)).await
 }
 
-pub async fn recompute_all_tag_embeddings(state: web::Data<AppState>) -> HttpResponse {
-    match state.core.recompute_all_tag_embeddings() {
+pub async fn recompute_all_tag_embeddings(db: Db) -> HttpResponse {
+    match db.0.recompute_all_tag_embeddings() {
         Ok(count) => HttpResponse::Ok().json(serde_json::json!({"count": count})),
         Err(e) => crate::error::error_response(e),
     }

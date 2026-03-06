@@ -1,7 +1,7 @@
 //! Clustering routes
 
+use crate::db_extractor::Db;
 use crate::error::blocking_ok;
-use crate::state::AppState;
 use actix_web::{web, HttpResponse};
 use serde::Deserialize;
 
@@ -12,12 +12,12 @@ pub struct ComputeClustersBody {
 }
 
 pub async fn compute_clusters(
-    state: web::Data<AppState>,
+    db: Db,
     body: web::Json<ComputeClustersBody>,
 ) -> HttpResponse {
     let min_similarity = body.min_similarity.unwrap_or(0.6);
     let min_cluster_size = body.min_cluster_size.unwrap_or(2);
-    let core = state.core.clone();
+    let core = db.0;
     match web::block(move || {
         let clusters = core.compute_clusters(min_similarity, min_cluster_size)?;
         core.save_clusters(&clusters)?;
@@ -29,8 +29,8 @@ pub async fn compute_clusters(
     }
 }
 
-pub async fn get_clusters(state: web::Data<AppState>) -> HttpResponse {
-    let core = state.core.clone();
+pub async fn get_clusters(db: Db) -> HttpResponse {
+    let core = db.0;
     blocking_ok(move || core.get_clusters()).await
 }
 
@@ -40,10 +40,10 @@ pub struct ConnectionCountsQuery {
 }
 
 pub async fn get_connection_counts(
-    state: web::Data<AppState>,
+    db: Db,
     query: web::Query<ConnectionCountsQuery>,
 ) -> HttpResponse {
     let min_similarity = query.min_similarity.unwrap_or(0.5);
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.get_connection_counts(min_similarity)).await
 }

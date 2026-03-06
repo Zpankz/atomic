@@ -482,4 +482,30 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
       max_notes: a.maxNotes ?? null,
     }),
   },
+
+  // ==================== Databases ====================
+  list_databases: {
+    method: 'GET',
+    path: '/api/databases',
+  },
+  create_database: {
+    method: 'POST',
+    path: '/api/databases',
+    argsMode: 'body',
+    transformArgs: (a) => ({ name: a.name }),
+  },
+  rename_database: {
+    method: 'PUT',
+    path: (a) => `/api/databases/${encodeURIComponent(a.id as string)}`,
+    argsMode: 'body',
+    transformArgs: (a) => ({ name: a.name }),
+  },
+  delete_database: {
+    method: 'DELETE',
+    path: (a) => `/api/databases/${encodeURIComponent(a.id as string)}`,
+  },
+  activate_database: {
+    method: 'PUT',
+    path: (a) => `/api/databases/${encodeURIComponent(a.id as string)}/activate`,
+  },
 };

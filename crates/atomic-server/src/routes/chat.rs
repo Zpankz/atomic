@@ -1,5 +1,6 @@
 //! Chat / Conversation routes
 
+use crate::db_extractor::Db;
 use crate::error::blocking_ok;
 use crate::event_bridge::chat_event_callback;
 use crate::state::AppState;
@@ -14,11 +15,11 @@ pub struct CreateConversationBody {
 }
 
 pub async fn create_conversation(
-    state: web::Data<AppState>,
+    db: Db,
     body: web::Json<CreateConversationBody>,
 ) -> HttpResponse {
     let req = body.into_inner();
-    let core = state.core.clone();
+    let core = db.0;
     match web::block(move || core.create_conversation(&req.tag_ids, req.title.as_deref())).await {
         Ok(Ok(conv)) => HttpResponse::Created().json(conv),
         Ok(Err(e)) => crate::error::error_response(e),
@@ -34,22 +35,22 @@ pub struct GetConversationsQuery {
 }
 
 pub async fn get_conversations(
-    state: web::Data<AppState>,
+    db: Db,
     query: web::Query<GetConversationsQuery>,
 ) -> HttpResponse {
     let limit = query.limit.unwrap_or(50);
     let offset = query.offset.unwrap_or(0);
     let filter_tag_id = query.filter_tag_id.clone();
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.get_conversations(filter_tag_id.as_deref(), limit, offset)).await
 }
 
 pub async fn get_conversation(
-    state: web::Data<AppState>,
+    db: Db,
     path: web::Path<String>,
 ) -> HttpResponse {
     let id = path.into_inner();
-    let core = state.core.clone();
+    let core = db.0;
     match web::block(move || core.get_conversation(&id)).await {
         Ok(Ok(Some(conv))) => HttpResponse::Ok().json(conv),
         Ok(Ok(None)) => {
@@ -67,22 +68,22 @@ pub struct UpdateConversationBody {
 }
 
 pub async fn update_conversation(
-    state: web::Data<AppState>,
+    db: Db,
     path: web::Path<String>,
     body: web::Json<UpdateConversationBody>,
 ) -> HttpResponse {
     let id = path.into_inner();
     let req = body.into_inner();
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.update_conversation(&id, req.title.as_deref(), req.is_archived)).await
 }
 
 pub async fn delete_conversation(
-    state: web::Data<AppState>,
+    db: Db,
     path: web::Path<String>,
 ) -> HttpResponse {
     let id = path.into_inner();
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.delete_conversation(&id)).await
 }
 
@@ -93,13 +94,13 @@ pub struct SetScopeBody {
 }
 
 pub async fn set_conversation_scope(
-    state: web::Data<AppState>,
+    db: Db,
     path: web::Path<String>,
     body: web::Json<SetScopeBody>,
 ) -> HttpResponse {
     let id = path.into_inner();
     let tag_ids = body.into_inner().tag_ids;
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.set_conversation_scope(&id, &tag_ids)).await
 }
 
@@ -109,22 +110,22 @@ pub struct AddTagBody {
 }
 
 pub async fn add_tag_to_scope(
-    state: web::Data<AppState>,
+    db: Db,
     path: web::Path<String>,
     body: web::Json<AddTagBody>,
 ) -> HttpResponse {
     let id = path.into_inner();
     let tag_id = body.into_inner().tag_id;
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.add_tag_to_scope(&id, &tag_id)).await
 }
 
 pub async fn remove_tag_from_scope(
-    state: web::Data<AppState>,
+    db: Db,
     path: web::Path<(String, String)>,
 ) -> HttpResponse {
     let (id, tag_id) = path.into_inner();
-    let core = state.core.clone();
+    let core = db.0;
     blocking_ok(move || core.remove_tag_from_scope(&id, &tag_id)).await
 }
 
@@ -135,6 +136,7 @@ pub struct SendMessageBody {
 
 pub async fn send_chat_message(
     state: web::Data<AppState>,
+    db: Db,
     path: web::Path<String>,
     body: web::Json<SendMessageBody>,
 ) -> HttpResponse {
@@ -142,8 +144,7 @@ pub async fn send_chat_message(
     let content = body.into_inner().content;
     let on_event = chat_event_callback(state.event_tx.clone());
 
-    match state
-        .core
+    match db.0
         .send_chat_message(&conversation_id, &content, on_event)
         .await
     {

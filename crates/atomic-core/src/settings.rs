@@ -77,6 +77,12 @@ pub fn get_setting(conn: &Connection, key: &str) -> Result<String, AtomicCoreErr
     .map_err(|e| AtomicCoreError::Configuration(format!("Failed to get setting '{}': {}", key, e)))
 }
 
+/// Migrate settings into a connection that has a `settings` table.
+/// Used by the registry to seed defaults into registry.db.
+pub fn migrate_settings_to(conn: &Connection) -> Result<(), AtomicCoreError> {
+    migrate_settings(conn)
+}
+
 /// Set a setting (upsert)
 pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<(), AtomicCoreError> {
     conn.execute(
