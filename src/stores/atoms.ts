@@ -144,6 +144,7 @@ interface AtomsStore {
   setSemanticSearchQuery: (query: string) => void;
   setSearchMode: (mode: SearchMode) => void;
   retryEmbedding: (atomId: string) => Promise<void>;
+  retryTagging: (atomId: string) => Promise<void>;
 
   // Filter & sort methods
   setSourceFilter: (filter: SourceFilterType) => void;
@@ -434,6 +435,21 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
       set((state) => ({
         atoms: state.atoms.map((a) =>
           a.id === atomId ? { ...a, embedding_status: 'pending' as const } : a
+        ),
+      }));
+    } catch (error) {
+      set({ error: String(error) });
+      throw error;
+    }
+  },
+
+  retryTagging: async (atomId: string) => {
+    set({ error: null });
+    try {
+      await getTransport().invoke('retry_tagging', { atomId });
+      set((state) => ({
+        atoms: state.atoms.map((a) =>
+          a.id === atomId ? { ...a, tagging_status: 'pending' as const } : a
         ),
       }));
     } catch (error) {

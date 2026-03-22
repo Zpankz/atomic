@@ -15,6 +15,7 @@ interface AtomGridProps {
   onAtomClick: (atomId: string) => void;
   getMatchingChunkContent?: (atomId: string) => string | undefined;
   onRetryEmbedding?: (atomId: string) => void;
+  onRetryTagging?: (atomId: string) => void;
   onLoadMore?: () => void;
   isLoading?: boolean;
   isLoadingMore?: boolean;
@@ -25,6 +26,7 @@ export const AtomGrid = memo(function AtomGrid({
   onAtomClick,
   getMatchingChunkContent,
   onRetryEmbedding,
+  onRetryTagging,
   onLoadMore,
   isLoading,
   isLoadingMore,
@@ -129,6 +131,7 @@ export const AtomGrid = memo(function AtomGrid({
                   viewMode="grid"
                   matchingChunkContent={getMatchingChunkContent?.(atom.id)}
                   onRetryEmbedding={onRetryEmbedding}
+                  onRetryTagging={onRetryTagging}
                 />
               ))}
             </div>

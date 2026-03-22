@@ -18,6 +18,7 @@ export function MainView() {
   const semanticSearchResults = useAtomsStore(s => s.semanticSearchResults);
   const semanticSearchQuery = useAtomsStore(s => s.semanticSearchQuery);
   const retryEmbedding = useAtomsStore(s => s.retryEmbedding);
+  const retryTagging = useAtomsStore(s => s.retryTagging);
   const search = useAtomsStore(s => s.search);
   const clearSemanticSearch = useAtomsStore(s => s.clearSemanticSearch);
 
@@ -119,6 +120,14 @@ export function MainView() {
       console.error('Failed to retry embedding:', error);
     }
   }, [retryEmbedding]);
+
+  const handleRetryTagging = useCallback(async (atomId: string) => {
+    try {
+      await retryTagging(atomId);
+    } catch (error) {
+      console.error('Failed to retry tagging:', error);
+    }
+  }, [retryTagging]);
 
   const handleOpenChat = useCallback(() => {
     openChatDrawer();
@@ -287,6 +296,7 @@ export function MainView() {
             onAtomClick={handleAtomClick}
             getMatchingChunkContent={isSemanticSearch ? getMatchingChunkContent : undefined}
             onRetryEmbedding={handleRetryEmbedding}
+            onRetryTagging={handleRetryTagging}
             onLoadMore={handleLoadMore}
             isLoading={isLoadingInitial}
             isLoadingMore={isLoadingMore}
@@ -297,6 +307,7 @@ export function MainView() {
             onAtomClick={handleAtomClick}
             getMatchingChunkContent={isSemanticSearch ? getMatchingChunkContent : undefined}
             onRetryEmbedding={handleRetryEmbedding}
+            onRetryTagging={handleRetryTagging}
             onLoadMore={handleLoadMore}
             isLoading={isLoadingInitial}
             isLoadingMore={isLoadingMore}

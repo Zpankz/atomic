@@ -148,6 +148,10 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'POST',
     path: (a) => `/api/embeddings/retry/${encodeURIComponent(a.atomId as string)}`,
   },
+  retry_tagging: {
+    method: 'POST',
+    path: (a) => `/api/tagging/retry/${encodeURIComponent(a.atomId as string)}`,
+  },
   reset_stuck_processing: {
     method: 'POST',
     path: '/api/embeddings/reset-stuck',

@@ -105,6 +105,10 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
         web::post().to(embedding::retry_embedding),
     );
     cfg.route(
+        "/tagging/retry/{atom_id}",
+        web::post().to(embedding::retry_tagging),
+    );
+    cfg.route(
         "/embeddings/reset-stuck",
         web::post().to(embedding::reset_stuck_processing),
     );

@@ -9,6 +9,7 @@ interface AtomListProps {
   onAtomClick: (atomId: string) => void;
   getMatchingChunkContent?: (atomId: string) => string | undefined;
   onRetryEmbedding?: (atomId: string) => void;
+  onRetryTagging?: (atomId: string) => void;
   onLoadMore?: () => void;
   isLoading?: boolean;
   isLoadingMore?: boolean;
@@ -19,6 +20,7 @@ export const AtomList = memo(function AtomList({
   onAtomClick,
   getMatchingChunkContent,
   onRetryEmbedding,
+  onRetryTagging,
   onLoadMore,
   isLoading,
   isLoadingMore,
@@ -104,6 +106,7 @@ export const AtomList = memo(function AtomList({
                 viewMode="list"
                 matchingChunkContent={getMatchingChunkContent?.(atom.id)}
                 onRetryEmbedding={onRetryEmbedding}
+                onRetryTagging={onRetryTagging}
               />
             </div>
           );

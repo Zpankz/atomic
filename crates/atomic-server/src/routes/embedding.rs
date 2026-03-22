@@ -34,6 +34,19 @@ pub async fn retry_embedding(
     }
 }
 
+pub async fn retry_tagging(
+    state: web::Data<AppState>,
+    db: Db,
+    path: web::Path<String>,
+) -> HttpResponse {
+    let atom_id = path.into_inner();
+    let on_event = embedding_event_callback(state.event_tx.clone());
+    match db.0.retry_tagging(&atom_id, on_event) {
+        Ok(()) => HttpResponse::Ok().json(serde_json::json!({"status": "ok"})),
+        Err(e) => crate::error::error_response(e),
+    }
+}
+
 pub async fn reset_stuck_processing(db: Db) -> HttpResponse {
     match db.0.reset_stuck_processing() {
         Ok(count) => HttpResponse::Ok().json(serde_json::json!({"count": count})),

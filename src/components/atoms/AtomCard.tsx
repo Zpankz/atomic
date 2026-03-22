@@ -28,16 +28,19 @@ interface AtomCardProps {
   viewMode: 'grid' | 'list';
   matchingChunkContent?: string;  // For search results
   onRetryEmbedding?: (atomId: string) => void;  // For retry action
+  onRetryTagging?: (atomId: string) => void;  // For tagging retry action
 }
 
 function ProcessingStatusIndicator({
   embeddingStatus,
   taggingStatus,
   onRetry,
+  onRetryTagging,
 }: {
   embeddingStatus: DisplayAtom['embedding_status'];
   taggingStatus: DisplayAtom['tagging_status'];
   onRetry?: () => void;
+  onRetryTagging?: () => void;
 }) {
   // Show failed state if embedding failed
   if (embeddingStatus === 'failed') {
@@ -89,13 +92,26 @@ function ProcessingStatusIndicator({
     );
   }
 
-  // Tagging failed (but embedding succeeded) - show warning but less critical
+  // Tagging failed (but embedding succeeded) - show retry button
   if (taggingFailed) {
     return (
-      <div
-        className="absolute top-2 right-2 w-2.5 h-2.5 bg-orange-500 rounded-full"
-        title="Tag extraction failed - atom is still searchable"
-      />
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onRetryTagging?.();
+        }}
+        className="absolute top-2 right-2 text-orange-500 hover:text-orange-400 transition-colors"
+        title="Tag extraction failed - click to retry"
+      >
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+          />
+        </svg>
+      </button>
     );
   }
 
@@ -108,9 +124,11 @@ export const AtomCard = memo(function AtomCard({
   viewMode,
   matchingChunkContent,
   onRetryEmbedding,
+  onRetryTagging,
 }: AtomCardProps) {
   const handleClick = () => onAtomClick(atom.id);
   const handleRetry = onRetryEmbedding ? () => onRetryEmbedding(atom.id) : undefined;
+  const handleRetryTagging = onRetryTagging ? () => onRetryTagging(atom.id) : undefined;
 
   const { title, snippet } = atom;
 
@@ -130,6 +148,7 @@ export const AtomCard = memo(function AtomCard({
           embeddingStatus={atom.embedding_status}
           taggingStatus={atom.tagging_status}
           onRetry={handleRetry}
+          onRetryTagging={handleRetryTagging}
         />
         <div className="flex-1 min-w-0">
           <div className="flex items-baseline gap-2">
