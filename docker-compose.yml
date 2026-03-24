@@ -1,8 +1,6 @@
 services:
   server:
-    build:
-      context: .
-      dockerfile: server.dockerfile
+    image: ghcr.io/kenforthewin/atomic-server:latest
     environment:
       - PUBLIC_URL=${PUBLIC_URL:-}
     volumes:
@@ -12,9 +10,7 @@ services:
     restart: unless-stopped
 
   web:
-    build:
-      context: .
-      dockerfile: web.dockerfile
+    image: ghcr.io/kenforthewin/atomic-web:latest
     networks:
       - internal
     restart: unless-stopped
