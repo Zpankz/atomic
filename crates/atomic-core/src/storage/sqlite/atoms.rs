@@ -71,29 +71,39 @@ impl SqliteStorage {
                 .lock()
                 .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
 
-            conn.execute(
-                "INSERT INTO atoms (id, content, source_url, source, published_at, created_at, updated_at, embedding_status, title, snippet)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                (
-                    id,
-                    &request.content,
-                    &request.source_url,
-                    &source,
-                    &request.published_at,
-                    created_at,
-                    created_at,
-                    &embedding_status,
-                    &title,
-                    &snippet,
-                ),
-            )?;
+            conn.execute_batch("BEGIN")?;
 
-            for tag_id in &request.tag_ids {
+            if let Err(e) = (|| -> Result<(), AtomicCoreError> {
                 conn.execute(
-                    "INSERT INTO atom_tags (atom_id, tag_id) VALUES (?1, ?2)",
-                    (id, tag_id),
+                    "INSERT INTO atoms (id, content, source_url, source, published_at, created_at, updated_at, embedding_status, title, snippet)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    (
+                        id,
+                        &request.content,
+                        &request.source_url,
+                        &source,
+                        &request.published_at,
+                        created_at,
+                        created_at,
+                        &embedding_status,
+                        &title,
+                        &snippet,
+                    ),
                 )?;
+
+                for tag_id in &request.tag_ids {
+                    conn.execute(
+                        "INSERT INTO atom_tags (atom_id, tag_id) VALUES (?1, ?2)",
+                        (id, tag_id),
+                    )?;
+                }
+                Ok(())
+            })() {
+                conn.execute_batch("ROLLBACK").ok();
+                return Err(e);
             }
+
+            conn.execute_batch("COMMIT")?;
         }
 
         let atom = Atom {
@@ -540,9 +550,18 @@ impl SqliteStorage {
         let tag_map = get_atom_tags_map_for_ids(&conn, &atom_ids)?;
 
         // Extract cursor from the last result for keyset pagination.
+        // The cursor value must correspond to the active sort column.
         let (next_cursor, next_cursor_id) = atoms
             .last()
-            .map(|last| (Some(last.7.clone()), Some(last.0.clone())))
+            .map(|last| {
+                let cursor_val = match params.sort_by {
+                    SortField::Updated => last.7.clone(),  // updated_at
+                    SortField::Created => last.6.clone(),  // created_at
+                    SortField::Published => last.5.clone().unwrap_or_else(|| last.6.clone()), // COALESCE(published_at, created_at)
+                    SortField::Title => last.1.clone(),    // title
+                };
+                (Some(cursor_val), Some(last.0.clone()))
+            })
             .unwrap_or((None, None));
 
         let summaries: Vec<AtomSummary> = atoms

@@ -422,20 +422,29 @@ fn batch_atoms_with_scope_tags(
         return Ok(std::collections::HashSet::new());
     }
 
+    // Use recursive CTE to include atoms tagged with descendants of the scope tags
     let atom_placeholders: Vec<&str> = atom_ids.iter().map(|_| "?").collect();
     let tag_placeholders: Vec<&str> = scope_tag_ids.iter().map(|_| "?").collect();
     let query = format!(
-        "SELECT DISTINCT atom_id FROM atom_tags WHERE atom_id IN ({}) AND tag_id IN ({})",
-        atom_placeholders.join(","),
-        tag_placeholders.join(","),
+        "WITH RECURSIVE scope_tags(id) AS (
+            SELECT id FROM tags WHERE id IN ({tag_ph})
+            UNION ALL
+            SELECT t.id FROM tags t
+            INNER JOIN scope_tags st ON t.parent_id = st.id
+         )
+         SELECT DISTINCT atom_id FROM atom_tags
+         WHERE atom_id IN ({atom_ph}) AND tag_id IN (SELECT id FROM scope_tags)",
+        tag_ph = tag_placeholders.join(","),
+        atom_ph = atom_placeholders.join(","),
     );
 
+    // Bind order matches SQL: tag_ids first (CTE), then atom_ids (WHERE)
     let mut params: Vec<&dyn rusqlite::ToSql> =
         Vec::with_capacity(atom_ids.len() + scope_tag_ids.len());
-    for id in atom_ids {
+    for id in scope_tag_ids {
         params.push(id);
     }
-    for id in scope_tag_ids {
+    for id in atom_ids {
         params.push(id);
     }
 

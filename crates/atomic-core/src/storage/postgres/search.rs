@@ -392,9 +392,16 @@ async fn pg_batch_atoms_with_scope_tags(
 
     let atom_id_strings: Vec<String> = atom_ids.iter().map(|s| s.to_string()).collect();
 
+    // Use recursive CTE to include atoms tagged with descendants of the scope tags
     let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT DISTINCT atom_id FROM atom_tags
-         WHERE atom_id = ANY($1) AND tag_id = ANY($2)",
+        "WITH RECURSIVE scope_tags(id) AS (
+            SELECT id FROM tags WHERE id = ANY($2)
+            UNION ALL
+            SELECT t.id FROM tags t
+            INNER JOIN scope_tags st ON t.parent_id = st.id
+         )
+         SELECT DISTINCT atom_id FROM atom_tags
+         WHERE atom_id = ANY($1) AND tag_id IN (SELECT id FROM scope_tags)",
     )
     .bind(&atom_id_strings)
     .bind(scope_tag_ids)

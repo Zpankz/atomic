@@ -46,7 +46,8 @@ CREATE TABLE IF NOT EXISTS atom_chunks (
 CREATE TABLE IF NOT EXISTS atom_positions (
     atom_id TEXT PRIMARY KEY REFERENCES atoms(id) ON DELETE CASCADE,
     x REAL NOT NULL,
-    y REAL NOT NULL
+    y REAL NOT NULL,
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS semantic_edges (

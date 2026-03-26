@@ -95,10 +95,10 @@ pub struct UpdateAtomRequest {
 #[derive(Clone)]
 pub struct AtomicCore {
     db: Arc<Database>,
-    /// Storage abstraction layer. For Phase 1, this is always SqliteStorage.
+    /// Storage abstraction layer supporting SQLite and Postgres at runtime.
     /// AtomicCore delegates pure DB operations to this, while keeping
     /// business logic (embedding triggers, LLM calls) in its own methods.
-    storage: storage::SqliteStorage,
+    storage: storage::StorageBackend,
     /// When present, settings and token operations delegate to the shared registry.
     /// When absent (standalone use, tests), uses per-db tables as before.
     registry: Option<Arc<registry::Registry>>,
@@ -108,7 +108,7 @@ impl AtomicCore {
     /// Open an existing database
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self, AtomicCoreError> {
         let db = Arc::new(Database::open(db_path)?);
-        let storage = storage::SqliteStorage::new(Arc::clone(&db));
+        let storage = storage::StorageBackend::Sqlite(storage::SqliteStorage::new(Arc::clone(&db)));
         Ok(Self { db, storage, registry: None })
     }
 
@@ -133,32 +133,29 @@ impl AtomicCore {
     }
 
     /// Open a Postgres-backed AtomicCore instance.
+    ///
+    /// A local SQLite stub DB is still created for operations not yet fully
+    /// abstracted (embedding pipeline internals that use `self.db` directly).
+    /// All storage-trait-delegated operations route to Postgres.
     #[cfg(feature = "postgres")]
     pub async fn open_postgres(
         database_url: &str,
         registry: Option<Arc<registry::Registry>>,
     ) -> Result<Self, AtomicCoreError> {
-        use storage::PostgresStorage;
-        use storage::Storage;
+        use storage::{PostgresStorage, Storage};
 
         let pg_storage = PostgresStorage::connect(database_url).await?;
         pg_storage.initialize().await?;
 
-        // We still need a SQLite database for operations that haven't been
-        // migrated to the storage trait yet (embedding pipeline internals, etc.).
-        // Use a temporary in-memory DB as a stub.
+        // Stub SQLite DB for non-storage-trait operations (embedding pipeline, etc.)
         let temp_dir = std::env::temp_dir().join("atomic-pg-stub");
         std::fs::create_dir_all(&temp_dir).ok();
         let stub_db = Database::open_or_create(temp_dir.join("stub.db"))?;
         let db = Arc::new(stub_db);
-        let sqlite_storage = storage::SqliteStorage::new(Arc::clone(&db));
 
-        // TODO: Once AtomicCore is fully async and uses dyn Storage,
-        // this stub DB can be removed. For now, methods not yet delegated
-        // to the storage trait still need self.db.
         Ok(Self {
             db,
-            storage: sqlite_storage,
+            storage: storage::StorageBackend::Postgres(pg_storage),
             registry,
         })
     }
@@ -272,7 +269,7 @@ impl AtomicCore {
         }
 
         let db = Arc::new(db);
-        let storage = storage::SqliteStorage::new(Arc::clone(&db));
+        let storage = storage::StorageBackend::Sqlite(storage::SqliteStorage::new(Arc::clone(&db)));
         Ok(Self { db, storage, registry })
     }
 

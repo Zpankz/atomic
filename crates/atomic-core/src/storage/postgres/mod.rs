@@ -47,23 +47,71 @@ impl PostgresStorage {
         Ok(Self { pool })
     }
 
-    /// Run migrations to set up the schema.
-    async fn run_migrations(&self) -> Result<(), AtomicCoreError> {
-        let migration_sql = include_str!("migrations/001_initial.sql");
+    /// Get a reference to the connection pool (for test cleanup, etc.)
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
 
-        // Check if schema already exists
-        let exists: bool = sqlx::query_scalar(
+    /// Run migrations incrementally based on schema_version.
+    /// Uses a Postgres advisory lock to serialize concurrent callers
+    /// (e.g., parallel test threads).
+    async fn run_migrations(&self) -> Result<(), AtomicCoreError> {
+        // Migration registry: (version, sql)
+        let migrations: &[(i32, &str)] = &[
+            (1, include_str!("migrations/001_initial.sql")),
+        ];
+
+        // Advisory lock key — arbitrary fixed i64 to serialize migrations
+        const MIGRATION_LOCK_KEY: i64 = 0x61746f6d69635f6d; // "atomic_m"
+
+        // Acquire advisory lock (session-level, blocks until available)
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(MIGRATION_LOCK_KEY)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(
+                format!("Failed to acquire migration lock: {}", e)
+            ))?;
+
+        let result = self.run_migrations_inner(migrations).await;
+
+        // Release advisory lock regardless of outcome
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(MIGRATION_LOCK_KEY)
+            .execute(&self.pool)
+            .await
+            .ok();
+
+        result
+    }
+
+    async fn run_migrations_inner(&self, migrations: &[(i32, &str)]) -> Result<(), AtomicCoreError> {
+        // Check if schema_version table exists
+        let table_exists: bool = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = 'schema_version')"
         )
         .fetch_one(&self.pool)
         .await
         .unwrap_or(false);
 
-        if !exists {
-            sqlx::raw_sql(migration_sql)
-                .execute(&self.pool)
+        let current_version: i32 = if table_exists {
+            sqlx::query_scalar::<_, i64>("SELECT COALESCE(MAX(version), 0) FROM schema_version")
+                .fetch_one(&self.pool)
                 .await
-                .map_err(|e| AtomicCoreError::DatabaseOperation(format!("Migration failed: {}", e)))?;
+                .unwrap_or(0) as i32
+        } else {
+            0
+        };
+
+        for &(version, sql) in migrations {
+            if version > current_version {
+                sqlx::raw_sql(sql)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(|e| AtomicCoreError::DatabaseOperation(
+                        format!("Migration {} failed: {}", version, e)
+                    ))?;
+            }
         }
 
         Ok(())

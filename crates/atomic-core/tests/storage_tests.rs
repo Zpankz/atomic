@@ -7,6 +7,9 @@
 //! Usage:
 //!   cargo test -p atomic-core --test storage_tests                         # SQLite only
 //!   cargo test -p atomic-core --test storage_tests --features postgres     # Both
+//!
+//! Note: Postgres tests must run serially (they share one DB):
+//!   cargo test -p atomic-core --test storage_tests --features postgres -- postgres_tests --test-threads=1
 
 use atomic_core::storage::SqliteStorage;
 use atomic_core::storage::traits::*;
@@ -29,10 +32,23 @@ async fn sqlite_storage() -> (SqliteStorage, TempDir) {
 async fn postgres_storage() -> Option<atomic_core::storage::PostgresStorage> {
     let url = match std::env::var("ATOMIC_TEST_DATABASE_URL") {
         Ok(url) => url,
-        Err(_) => return None, // Skip Postgres tests when env var not set
+        Err(_) => return None,
     };
     let storage = atomic_core::storage::PostgresStorage::connect(&url).await.unwrap();
     storage.initialize().await.unwrap();
+
+    // Truncate data tables for a clean test (preserve schema)
+    sqlx::raw_sql(
+        "TRUNCATE atoms, tags, atom_tags, atom_chunks, atom_positions, \
+         semantic_edges, atom_clusters, tag_embeddings, \
+         wiki_articles, wiki_citations, wiki_links, wiki_article_versions, \
+         conversations, conversation_tags, chat_messages, chat_tool_calls, chat_citations, \
+         feeds, feed_tags, feed_items, settings CASCADE"
+    )
+    .execute(storage.pool())
+    .await
+    .ok();
+
     Some(storage)
 }
 
@@ -343,11 +359,11 @@ mod postgres_tests {
         ($name:ident, $body:expr) => {
             #[tokio::test]
             async fn $name() {
-                let Some(s) = postgres_storage().await else {
+                let Some(ref s) = postgres_storage().await else {
                     eprintln!("Skipping {} (ATOMIC_TEST_DATABASE_URL not set)", stringify!($name));
                     return;
                 };
-                $body(&s).await;
+                $body(s).await;
             }
         };
     }
@@ -367,19 +383,19 @@ mod postgres_tests {
 
     #[tokio::test]
     async fn pg_save_and_get_wiki() {
-        let Some(s) = postgres_storage().await else {
+        let Some(ref s) = postgres_storage().await else {
             eprintln!("Skipping (ATOMIC_TEST_DATABASE_URL not set)");
             return;
         };
-        test_save_and_get_wiki(&s, &s).await;
+        test_save_and_get_wiki(s, s).await;
     }
 
     #[tokio::test]
     async fn pg_delete_wiki() {
-        let Some(s) = postgres_storage().await else {
+        let Some(ref s) = postgres_storage().await else {
             eprintln!("Skipping (ATOMIC_TEST_DATABASE_URL not set)");
             return;
         };
-        test_delete_wiki(&s, &s).await;
+        test_delete_wiki(s, s).await;
     }
 }

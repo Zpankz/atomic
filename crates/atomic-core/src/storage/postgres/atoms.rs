@@ -187,35 +187,39 @@ impl AtomStore for PostgresStorage {
         let embedding_status = "pending";
         let tagging_status = "pending";
 
-        db_err!(
-            sqlx::query(
-                "INSERT INTO atoms (id, content, source_url, source, published_at, created_at, updated_at, embedding_status, tagging_status, title, snippet)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
-            )
-            .bind(id)
-            .bind(&request.content)
-            .bind(&request.source_url)
-            .bind(&source)
-            .bind(&request.published_at)
-            .bind(created_at)
-            .bind(created_at)
-            .bind(embedding_status)
-            .bind(tagging_status)
-            .bind(&title)
-            .bind(&snippet)
-            .execute(&self.pool)
-            .await
-        )?;
+        let mut tx = self.pool.begin().await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+
+        sqlx::query(
+            "INSERT INTO atoms (id, content, source_url, source, published_at, created_at, updated_at, embedding_status, tagging_status, title, snippet)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
+        )
+        .bind(id)
+        .bind(&request.content)
+        .bind(&request.source_url)
+        .bind(&source)
+        .bind(&request.published_at)
+        .bind(created_at)
+        .bind(created_at)
+        .bind(embedding_status)
+        .bind(tagging_status)
+        .bind(&title)
+        .bind(&snippet)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
 
         for tag_id in &request.tag_ids {
-            db_err!(
-                sqlx::query("INSERT INTO atom_tags (atom_id, tag_id) VALUES ($1, $2)")
-                    .bind(id)
-                    .bind(tag_id)
-                    .execute(&self.pool)
-                    .await
-            )?;
+            sqlx::query("INSERT INTO atom_tags (atom_id, tag_id) VALUES ($1, $2)")
+                .bind(id)
+                .bind(tag_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
         }
+
+        tx.commit().await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
 
         let tags = self.tags_for_atom(id).await?;
 
@@ -667,10 +671,18 @@ impl AtomStore for PostgresStorage {
         let atom_ids: Vec<String> = rows.iter().map(|r| r.0.clone()).collect();
         let tag_map = self.tags_for_atom_ids(&atom_ids).await?;
 
-        // Extract cursor from last result
+        // Extract cursor from last result — must match the active sort column
         let (next_cursor, next_cursor_id) = rows
             .last()
-            .map(|last| (Some(last.7.clone()), Some(last.0.clone())))
+            .map(|last| {
+                let cursor_val = match params.sort_by {
+                    SortField::Updated => last.7.clone(),  // updated_at
+                    SortField::Created => last.6.clone(),  // created_at
+                    SortField::Published => last.5.clone().unwrap_or_else(|| last.6.clone()), // COALESCE(published_at, created_at)
+                    SortField::Title => last.1.clone(),    // title
+                };
+                (Some(cursor_val), Some(last.0.clone()))
+            })
             .unwrap_or((None, None));
 
         let summaries: Vec<AtomSummary> = rows
