@@ -64,14 +64,12 @@ impl AtomicMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let core = self.resolve_core(&context)?;
         let limit = params.limit.unwrap_or(10).min(50);
-        let threshold = params.threshold.unwrap_or(0.3).clamp(0.0, 1.0);
-
         let options = atomic_core::SearchOptions::new(
             params.query,
             atomic_core::SearchMode::Hybrid,
             limit,
         )
-        .with_threshold(threshold);
+        .with_threshold(0.3);
 
         let results = core
             .search(options)
@@ -104,7 +102,7 @@ impl AtomicMcpServer {
         Parameters(params): Parameters<ReadAtomParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let core = self.resolve_core(&context)?;
-        let limit = params.limit.unwrap_or(100).min(500) as usize;
+        let limit = params.limit.unwrap_or(500).min(500) as usize;
         let offset = params.offset.unwrap_or(0).max(0) as usize;
 
         let atom_with_tags = match core.get_atom(&params.atom_id) {
@@ -168,7 +166,7 @@ impl AtomicMcpServer {
             content: params.content.clone(),
             source_url: params.source_url,
             published_at: None,
-            tag_ids: params.tag_ids.unwrap_or_default(),
+            tag_ids: vec![],
         };
 
         let on_event = embedding_event_callback(self.event_tx.clone());
