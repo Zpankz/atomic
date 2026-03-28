@@ -200,8 +200,12 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
   availableSources: [],
 
   fetchAtoms: async () => {
-    const { sourceFilter, sourceValue, sortBy, sortOrder } = get();
-    set({ atoms: [], isLoadingInitial: true, error: null, currentTagFilter: null, currentOffset: 0, nextCursor: null, nextCursorId: null });
+    const { sourceFilter, sourceValue, sortBy, sortOrder, atoms: existingAtoms } = get();
+    const isRefresh = existingAtoms.length > 0;
+    set({
+      ...(isRefresh ? {} : { atoms: [], isLoadingInitial: true }),
+      error: null, currentTagFilter: null, currentOffset: 0, nextCursor: null, nextCursorId: null,
+    });
     try {
       const args: Record<string, unknown> = { limit: PAGE_SIZE, offset: 0 };
       if (sourceFilter !== 'all') args.source = sourceFilter;
@@ -224,8 +228,12 @@ export const useAtomsStore = create<AtomsStore>((set, get) => ({
   },
 
   fetchAtomsByTag: async (tagId: string) => {
-    const { sourceFilter, sourceValue, sortBy, sortOrder } = get();
-    set({ atoms: [], isLoadingInitial: true, error: null, currentTagFilter: tagId, currentOffset: 0, nextCursor: null, nextCursorId: null });
+    const { sourceFilter, sourceValue, sortBy, sortOrder, atoms: existingAtoms } = get();
+    const isRefresh = existingAtoms.length > 0;
+    set({
+      ...(isRefresh ? {} : { atoms: [], isLoadingInitial: true }),
+      error: null, currentTagFilter: tagId, currentOffset: 0, nextCursor: null, nextCursorId: null,
+    });
     try {
       const args: Record<string, unknown> = { tagId, limit: PAGE_SIZE, offset: 0 };
       if (sourceFilter !== 'all') args.source = sourceFilter;
