@@ -86,9 +86,14 @@ function DatabasesTab() {
   const handleConfirmDelete = async () => {
     if (!confirmDeleteDb) return;
     setIsDeleting(true);
-    await deleteDatabase(confirmDeleteDb.id);
-    setIsDeleting(false);
-    setConfirmDeleteDb(null);
+    try {
+      await deleteDatabase(confirmDeleteDb.id);
+      setConfirmDeleteDb(null);
+    } catch {
+      // Keep dialog open so user can retry or cancel
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   const handleSetDefault = async (id: string) => {
