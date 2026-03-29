@@ -7,7 +7,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # Stage 2: Cache Rust dependencies
-FROM rust:1.87-bookworm AS deps
+FROM rust:1.88-bookworm AS deps
 WORKDIR /app
 RUN cargo install cargo-chef --locked
 COPY Cargo.toml ./
@@ -17,7 +17,7 @@ COPY migrations/ migrations/
 RUN cargo chef prepare --recipe-path recipe.json
 
 # Stage 3: Cook dependencies (cached unless Cargo.toml changes)
-FROM rust:1.87-bookworm AS builder
+FROM rust:1.88-bookworm AS builder
 WORKDIR /app
 RUN cargo install cargo-chef --locked
 COPY --from=deps /app/recipe.json recipe.json
