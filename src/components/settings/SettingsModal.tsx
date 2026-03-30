@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import { toast } from 'sonner';
 import { Button } from '../ui/Button';
 import { CustomSelect } from '../ui/CustomSelect';
 import { SearchableSelect } from '../ui/SearchableSelect';
@@ -424,6 +425,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       fetchTags();
     } catch (e) {
       console.error('Failed to switch to local:', e);
+      toast.error('Failed to switch to local server', { description: String(e) });
     }
   };
 
@@ -435,6 +437,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       setApiTokens(tokens);
     } catch (e) {
       console.error('Failed to load API tokens:', e);
+      toast.error('Failed to load API tokens', { description: String(e) });
     } finally {
       setIsLoadingTokens(false);
     }
@@ -453,6 +456,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       await loadApiTokens();
     } catch (e) {
       console.error('Failed to create token:', e);
+      toast.error('Failed to create API token', { description: String(e) });
     } finally {
       setIsCreatingToken(false);
     }
@@ -477,6 +481,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       await loadApiTokens();
     } catch (e) {
       console.error('Failed to revoke token:', e);
+      toast.error('Failed to revoke token', { description: String(e) });
     } finally {
       setConfirmRevokeId(null);
     }
@@ -491,6 +496,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
       setFeeds(result);
     } catch (e) {
       console.error('Failed to load feeds:', e);
+      toast.error('Failed to load feeds', { description: String(e) });
       setFeedError(String(e));
     } finally {
       setFeedsLoading(false);
@@ -615,7 +621,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         setIsLoadingModels(true);
         getAvailableLlmModels()
           .then(models => setAvailableModels(models))
-          .catch(err => console.error('Failed to load models:', err))
+          .catch(err => { console.error('Failed to load models:', err); toast.error('Failed to load models', { description: String(err) }); })
           .finally(() => setIsLoadingModels(false));
       }
       // Load API tokens when connected to a non-local server

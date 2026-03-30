@@ -25,6 +25,13 @@ async fn health() -> impl Responder {
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "atomic_core=info,atomic_server=info,warn".parse().unwrap())
+        )
+        .init();
+
     let cli = Cli::parse();
     let data_dir = cli.resolve_data_dir();
 
@@ -64,17 +71,17 @@ fn create_manager(
     match storage {
         "postgres" => {
             let url = database_url.unwrap_or_else(|| {
-                eprintln!("Error: --database-url is required when --storage=postgres");
-                eprintln!("Example: --database-url postgres://user:pass@localhost:5432/atomic");
-                eprintln!("Or set ATOMIC_DATABASE_URL environment variable.");
+                tracing::error!("--database-url is required when --storage=postgres");
+                tracing::error!("Example: --database-url postgres://user:pass@localhost:5432/atomic");
+                tracing::error!("Or set ATOMIC_DATABASE_URL environment variable.");
                 std::process::exit(1);
             });
-            eprintln!("Storage: postgres ({})", url.split('@').last().unwrap_or(url));
+            tracing::info!(backend = "postgres", host = url.split('@').last().unwrap_or(url), "storage backend selected");
             atomic_core::DatabaseManager::new_postgres(data_dir, url)
                 .expect("Failed to connect to Postgres")
         }
         _ => {
-            eprintln!("Storage: sqlite ({})", data_dir.display());
+            tracing::info!(backend = "sqlite", path = %data_dir.display(), "storage backend selected");
             atomic_core::DatabaseManager::new(data_dir)
                 .expect("Failed to open database manager")
         }
@@ -154,9 +161,9 @@ async fn run_server(
 
     // Migrate legacy token if present
     match core.migrate_legacy_token() {
-        Ok(true) => println!("  Migrated legacy auth token to new token system"),
+        Ok(true) => tracing::info!("migrated legacy auth token to new token system"),
         Ok(false) => {}
-        Err(e) => eprintln!("  Warning: failed to migrate legacy token: {}", e),
+        Err(e) => tracing::warn!(error = %e, "failed to migrate legacy token"),
     }
 
     // Check token status
@@ -164,13 +171,12 @@ async fn run_server(
         Ok(tokens) => {
             let active = tokens.iter().filter(|t| !t.is_revoked).count();
             if active == 0 {
-                println!("  No API tokens configured — open the web UI to claim this instance");
-                println!("  Or create one with: atomic-server token create --name default");
+                tracing::info!("no API tokens configured — open the web UI to claim this instance or run: atomic-server token create --name default");
             } else {
-                println!("  {} active API token(s) configured", active);
+                tracing::info!(count = active, "active API tokens configured");
             }
         }
-        Err(e) => eprintln!("  Warning: failed to check tokens: {}", e),
+        Err(e) => tracing::warn!(error = %e, "failed to check tokens"),
     }
 
     // Create broadcast channel for WebSocket events (buffer 256 events)
@@ -207,19 +213,15 @@ async fn run_server(
         .sse_keep_alive(Duration::from_secs(30))
         .build();
 
-    println!("Atomic Server starting...");
-    println!("  Data dir: {}", data_dir);
-    println!("  Listening: http://{}:{}", bind, port);
+    tracing::info!("Atomic Server starting...");
+    tracing::info!(data_dir = data_dir, "data directory");
+    tracing::info!(bind = bind, port = port, "listening on http://{}:{}", bind, port);
     if let Some(ref url) = public_url {
-        println!("  Public URL: {}", url);
+        tracing::info!(public_url = %url, "public URL configured");
     }
-    println!();
-    println!("  Health: http://{}:{}/health", bind, port);
-    println!("  MCP: http://{}:{}/mcp", bind, port);
-    println!(
-        "  WebSocket: ws://{}:{}/ws?token=<token>",
-        bind, port
-    );
+    tracing::info!(bind = bind, port = port, "health: http://{}:{}/health", bind, port);
+    tracing::info!(bind = bind, port = port, "MCP: http://{}:{}/mcp", bind, port);
+    tracing::info!(bind = bind, port = port, "WebSocket: ws://{}:{}/ws?token=<token>", bind, port);
 
     // Startup recovery: reset stuck atoms and process any pending work for ALL databases
     {
@@ -228,28 +230,28 @@ async fn run_server(
             let db_core = match manager.get_core(&db_info.id) {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("  Warning: failed to load database '{}': {}", db_info.name, e);
+                    tracing::warn!(db = %db_info.name, error = %e, "failed to load database");
                     continue;
                 }
             };
             let on_event = event_bridge::embedding_event_callback(app_state.event_tx.clone());
 
             match db_core.reset_stuck_processing() {
-                Ok(count) if count > 0 => println!("  [{}] Reset {} atoms stuck in processing state", db_info.name, count),
+                Ok(count) if count > 0 => tracing::info!(db = %db_info.name, count = count, "reset atoms stuck in processing state"),
                 Ok(_) => {}
-                Err(e) => eprintln!("  Warning: [{}] failed to reset stuck processing: {}", db_info.name, e),
+                Err(e) => tracing::warn!(db = %db_info.name, error = %e, "failed to reset stuck processing"),
             }
 
             match db_core.process_pending_embeddings(on_event.clone()) {
-                Ok(count) if count > 0 => println!("  [{}] Processing {} pending embeddings in background", db_info.name, count),
+                Ok(count) if count > 0 => tracing::info!(db = %db_info.name, count = count, "processing pending embeddings in background"),
                 Ok(_) => {}
-                Err(e) => eprintln!("  Warning: [{}] failed to start pending embeddings: {}", db_info.name, e),
+                Err(e) => tracing::warn!(db = %db_info.name, error = %e, "failed to start pending embeddings"),
             }
 
             match db_core.process_pending_tagging(on_event) {
-                Ok(count) if count > 0 => println!("  [{}] Processing {} pending tagging operations in background", db_info.name, count),
+                Ok(count) if count > 0 => tracing::info!(db = %db_info.name, count = count, "processing pending tagging operations in background"),
                 Ok(_) => {}
-                Err(e) => eprintln!("  Warning: [{}] failed to start pending tagging: {}", db_info.name, e),
+                Err(e) => tracing::warn!(db = %db_info.name, error = %e, "failed to start pending tagging"),
             }
         }
     }
@@ -277,9 +279,13 @@ async fn run_server(
                     let results = db_core.poll_due_feeds(on_ingest, on_embed).await;
                     for r in &results {
                         if r.new_items > 0 {
-                            eprintln!(
-                                "[{}] Feed {}: {} new, {} skipped, {} errors",
-                                db_info.name, r.feed_id, r.new_items, r.skipped, r.errors
+                            tracing::info!(
+                                db = %db_info.name,
+                                feed_id = %r.feed_id,
+                                new = r.new_items,
+                                skipped = r.skipped,
+                                errors = r.errors,
+                                "feed poll complete"
                             );
                         }
                     }
@@ -353,7 +359,7 @@ async fn run_server(
     .await?;
 
     // Graceful shutdown: update query planner statistics
-    println!("Shutting down — running PRAGMA optimize...");
+    tracing::info!("shutting down — running PRAGMA optimize...");
     shutdown_manager.optimize_all();
 
     Ok(())
