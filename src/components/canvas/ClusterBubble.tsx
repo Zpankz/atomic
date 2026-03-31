@@ -25,28 +25,28 @@ function getNodeStyle(nodeType: CanvasNodeType, label: string) {
         borderStyle: 'solid' as const,
         borderColor: `hsla(${hue}, 50%, 50%, 0.6)`,
         bgColor: `hsla(${hue}, 40%, 20%, 0.3)`,
-        width: 200,
+        width: 130,
       };
     case 'tag':
       return {
         borderStyle: 'solid' as const,
         borderColor: `hsla(${hue}, 50%, 50%, 0.5)`,
         bgColor: `hsla(${hue}, 30%, 22%, 0.25)`,
-        width: 180,
+        width: 120,
       };
     case 'semantic_cluster':
       return {
         borderStyle: 'dashed' as const,
         borderColor: `hsla(${hue}, 40%, 50%, 0.4)`,
         bgColor: `hsla(${hue}, 25%, 25%, 0.2)`,
-        width: 190,
+        width: 125,
       };
     default:
       return {
         borderStyle: 'solid' as const,
         borderColor: 'var(--color-border)',
         bgColor: 'var(--color-bg-card)',
-        width: 160,
+        width: 110,
       };
   }
 }
@@ -80,7 +80,7 @@ export const ClusterBubble = memo(function ClusterBubble({
       onClick={() => onClick(node)}
     >
       <div
-        className="rounded-lg px-4 py-3 border-2 backdrop-blur-sm"
+        className="rounded px-2 py-1.5 border backdrop-blur-sm"
         style={{
           borderStyle: style.borderStyle,
           borderColor: style.borderColor,
@@ -89,25 +89,25 @@ export const ClusterBubble = memo(function ClusterBubble({
       >
         {/* Type badge */}
         {typeLabel && (
-          <span className="text-[10px] uppercase tracking-wider text-[var(--color-text-tertiary)] block mb-1">
+          <span className="text-[8px] uppercase tracking-wider text-[var(--color-text-tertiary)] block mb-0.5">
             {typeLabel}
           </span>
         )}
 
         {/* Label */}
-        <p className="text-sm font-medium text-[var(--color-text-primary)] line-clamp-2 break-words">
+        <p className="text-[10px] font-medium text-[var(--color-text-primary)] truncate leading-tight">
           {node.label}
         </p>
 
         {/* Atom count */}
-        <div className="flex items-center gap-2 mt-1.5">
-          <span className="text-xs text-[var(--color-text-secondary)]">
-            {node.atom_count} atom{node.atom_count !== 1 ? 's' : ''}
+        <div className="flex items-center gap-1 mt-0.5">
+          <span className="text-[9px] text-[var(--color-text-secondary)]">
+            {node.atom_count}
           </span>
 
           {/* Dominant tags for clusters */}
           {node.node_type === 'semantic_cluster' && node.dominant_tags.length > 0 && (
-            <span className="text-[10px] text-[var(--color-text-tertiary)] truncate">
+            <span className="text-[8px] text-[var(--color-text-tertiary)] truncate">
               {node.dominant_tags.slice(0, 2).join(', ')}
             </span>
           )}

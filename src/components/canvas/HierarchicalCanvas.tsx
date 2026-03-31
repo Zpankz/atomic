@@ -106,6 +106,16 @@ export function HierarchicalCanvas() {
     return map;
   }, [simNodes]);
 
+  // Compute per-atom connection counts from edges
+  const atomConnectionCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const edge of edges) {
+      counts.set(edge.source_id, (counts.get(edge.source_id) || 0) + 1);
+      counts.set(edge.target_id, (counts.get(edge.target_id) || 0) + 1);
+    }
+    return counts;
+  }, [edges]);
+
   // Build atom summary objects for AtomNode (minimal shape)
   const atomSummaryMap = useMemo(() => {
     const map = new Map<string, import('../../stores/atoms').AtomSummary>();
@@ -160,12 +170,19 @@ export function HierarchicalCanvas() {
           </div>
         )}
 
-        {dimensions.width > 0 && simNodes.length > 0 && (
+        {dimensions.width > 0 && simNodes.length > 0 && (() => {
+          const scale = nodes.length <= 8 ? 2 : nodes.length <= 20 ? 1.5 : 1.2;
+          // Offset so the center of content stays centered in the viewport when scaled
+          const offsetX = -(dimensions.width * scale - dimensions.width) / 2;
+          const offsetY = -(dimensions.height * scale - dimensions.height) / 2;
+          return (
           <div className={`w-full h-full transition-opacity duration-200 ${fadeIn ? 'opacity-100' : 'opacity-0'}`}>
           <TransformWrapper
-            initialScale={1}
+            initialScale={scale}
+            initialPositionX={offsetX}
+            initialPositionY={offsetY}
             minScale={0.3}
-            maxScale={3}
+            maxScale={4}
             limitToBounds={false}
             doubleClick={{ disabled: true }}
             panning={{ velocityDisabled: true }}
@@ -187,6 +204,8 @@ export function HierarchicalCanvas() {
                       const src = nodePositionMap.get(edge.source_id);
                       const tgt = nodePositionMap.get(edge.target_id);
                       if (!src || !tgt) return null;
+                      const w = edge.weight;
+                      const strong = w >= 0.6;
                       return (
                         <line
                           key={`${edge.source_id}-${edge.target_id}`}
@@ -194,9 +213,10 @@ export function HierarchicalCanvas() {
                           y1={src.y}
                           x2={tgt.x}
                           y2={tgt.y}
-                          stroke="var(--color-accent)"
-                          strokeWidth={1 + edge.weight}
-                          strokeOpacity={0.15 + edge.weight * 0.2}
+                          stroke={strong ? 'hsl(265, 55%, 58%)' : 'hsl(0, 0%, 42%)'}
+                          strokeWidth={0.5}
+                          strokeOpacity={strong ? 0.5 : 0.2}
+                          strokeDasharray={strong ? undefined : '3 3'}
                         />
                       );
                     })}
@@ -208,6 +228,7 @@ export function HierarchicalCanvas() {
                     if (node.node_type === 'atom') {
                       const atomSummary = atomSummaryMap.get(node.id);
                       if (!atomSummary) return null;
+                      const connCount = atomConnectionCounts.get(node.id) || 0;
                       return (
                         <AtomNode
                           key={node.id}
@@ -216,6 +237,8 @@ export function HierarchicalCanvas() {
                           x={sn.x}
                           y={sn.y}
                           isFaded={false}
+                          isHub={connCount >= 3}
+                          connectionCount={connCount}
                           onClick={handleAtomNodeClick}
                         />
                       );
@@ -266,7 +289,8 @@ export function HierarchicalCanvas() {
             )}
           </TransformWrapper>
           </div>
-        )}
+          );
+        })()}
       </div>
     </div>
   );
