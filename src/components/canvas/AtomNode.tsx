@@ -11,6 +11,7 @@ interface AtomNodeProps {
   connectionCount?: number;
   onClick: (atomId: string) => void;
   atomId: string;
+  style?: React.CSSProperties;
 }
 
 // Generate a consistent color from a string (tag name)
@@ -49,6 +50,7 @@ export const AtomNode = memo(function AtomNode({
   // connectionCount available via props if needed
   onClick,
   atomId,
+  style: externalStyle,
 }: AtomNodeProps) {
   // Use title if available, fall back to snippet
   const displayContent = useMemo(() => {
@@ -73,6 +75,7 @@ export const AtomNode = memo(function AtomNode({
         left: x,
         top: y,
         transform: 'translate(-50%, -50%)',
+        ...externalStyle,
         width: `${nodeWidth}px`,
       }}
       onClick={() => onClick(atomId)}

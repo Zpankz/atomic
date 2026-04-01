@@ -44,6 +44,7 @@ pub mod ingest;
 pub mod import;
 pub mod manager;
 pub mod models;
+pub mod projection;
 pub mod providers;
 pub mod registry;
 pub mod search;
@@ -1120,6 +1121,74 @@ impl AtomicCore {
     /// Get atoms with their average embedding vector for similarity calculations
     pub fn get_atoms_with_embeddings(&self) -> Result<Vec<AtomWithEmbedding>, AtomicCoreError> {
         self.storage.get_atoms_with_embeddings_impl()
+    }
+
+    /// Compute PCA 2D projection of all atom embeddings and return positioned atoms.
+    ///
+    /// Loads all embeddings, runs PCA, saves positions, joins with metadata.
+    pub fn compute_and_get_canvas_data(&self) -> Result<Vec<CanvasAtomPosition>, AtomicCoreError> {
+        let db = self.database().ok_or_else(|| {
+            AtomicCoreError::Configuration("Global canvas requires SQLite backend".to_string())
+        })?;
+        let conn = db.conn.lock().map_err(|e| {
+            AtomicCoreError::DatabaseOperation(format!("Lock error: {}", e))
+        })?;
+
+        // Load all average embeddings
+        let embedding_map = get_all_average_embeddings(&conn)?;
+        if embedding_map.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Convert to the format PCA expects
+        let embeddings: Vec<(String, Vec<f32>)> = embedding_map.into_iter().collect();
+
+        // Run PCA projection
+        let projected = projection::compute_2d_projection(&embeddings);
+
+        // Save positions
+        let positions: Vec<AtomPosition> = projected.iter().map(|(id, x, y)| {
+            AtomPosition { atom_id: id.clone(), x: *x, y: *y }
+        }).collect();
+
+        // Save in a transaction
+        conn.execute_batch("BEGIN")?;
+        conn.execute("DELETE FROM atom_positions", [])?;
+        let mut stmt = conn.prepare(
+            "INSERT INTO atom_positions (atom_id, x, y, updated_at) VALUES (?1, ?2, ?3, ?4)"
+        )?;
+        let now = chrono::Utc::now().to_rfc3339();
+        for pos in &positions {
+            stmt.execute(rusqlite::params![pos.atom_id, pos.x, pos.y, now])?;
+        }
+        conn.execute_batch("COMMIT")?;
+        drop(stmt);
+
+        // Join with atom metadata
+        let mut result_stmt = conn.prepare(
+            "SELECT ap.atom_id, ap.x, ap.y,
+                    SUBSTR(a.content, 1, 80) as title,
+                    (SELECT t.name FROM atom_tags at JOIN tags t ON at.tag_id = t.id WHERE at.atom_id = ap.atom_id LIMIT 1) as primary_tag,
+                    (SELECT COUNT(*) FROM atom_tags at WHERE at.atom_id = ap.atom_id) as tag_count
+             FROM atom_positions ap
+             JOIN atoms a ON ap.atom_id = a.id"
+        )?;
+
+        let results = result_stmt.query_map([], |row| {
+            let content: String = row.get(3)?;
+            let (title, _) = extract_title_and_snippet(&content, 60);
+            Ok(CanvasAtomPosition {
+                atom_id: row.get(0)?,
+                x: row.get(1)?,
+                y: row.get(2)?,
+                title,
+                primary_tag: row.get(4)?,
+                tag_count: row.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(results)
     }
 
     // ==================== Semantic Graph Operations ====================

@@ -291,6 +291,18 @@ pub struct AtomPosition {
     pub y: f64,
 }
 
+/// Atom with 2D position and metadata for the global canvas view
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct CanvasAtomPosition {
+    pub atom_id: String,
+    pub x: f64,
+    pub y: f64,
+    pub title: String,
+    pub primary_tag: Option<String>,
+    pub tag_count: i32,
+}
+
 /// Atom with its average embedding vector for similarity calculations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

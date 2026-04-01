@@ -156,6 +156,20 @@ export async function getCanvasLevel(
   });
 }
 
+// Global canvas (PCA-projected positions)
+export interface CanvasAtomPosition {
+  atom_id: string;
+  x: number;
+  y: number;
+  title: string;
+  primary_tag: string | null;
+  tag_count: number;
+}
+
+export async function getGlobalCanvas(): Promise<CanvasAtomPosition[]> {
+  return getTransport().invoke('get_global_canvas', {});
+}
+
 // Semantic graph types and commands
 export interface SemanticEdge {
   id: string;
