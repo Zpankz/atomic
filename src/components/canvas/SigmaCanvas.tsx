@@ -29,6 +29,9 @@ export function SigmaCanvas() {
   const [error, setError] = useState<string | null>(null);
   const [theme, setTheme] = useState<CanvasTheme>(DEFAULT_THEME);
   const [themePickerOpen, setThemePickerOpen] = useState(false);
+  const [edgeThreshold, setEdgeThreshold] = useState(0);
+  const edgeThresholdRef = useRef(0);
+  const edgeAnimProgress = useRef(1); // 0 = invisible, 1 = fully visible
   const themeRef = useRef(theme);
   themeRef.current = theme;
 
@@ -186,11 +189,15 @@ export function SigmaCanvas() {
       },
       edgeReducer: (_edge, attrs) => {
         const w = (attrs as any).weight ?? 0.5;
+        if (w < edgeThresholdRef.current) {
+          return { ...attrs, hidden: true };
+        }
         const t = themeRef.current;
+        const anim = edgeAnimProgress.current;
         return {
           ...attrs,
-          color: edgeColor(t, w),
-          size: 0.2 + w * 0.7,
+          color: edgeColor(t, w * anim),
+          size: (0.2 + w * 0.7) * anim,
         };
       },
     });
@@ -270,6 +277,19 @@ export function SigmaCanvas() {
     sigma.on('afterRender', drawClusterLabels);
     requestAnimationFrame(drawClusterLabels);
 
+    // Animate edges fading in on first load
+    edgeAnimProgress.current = 0;
+    const animDuration = 3000;
+    const animStart = performance.now();
+    function animateEdges(now: number) {
+      const t = Math.min(1, (now - animStart) / animDuration);
+      const eased = 1 - (1 - t) ** 3; // ease out cubic
+      edgeAnimProgress.current = eased;
+      sigma.refresh();
+      if (t < 1) requestAnimationFrame(animateEdges);
+    }
+    requestAnimationFrame(animateEdges);
+
     sigma.on('clickNode', ({ node }) => {
       openDrawer('viewer', node);
     });
@@ -307,6 +327,35 @@ export function SigmaCanvas() {
   useEffect(() => {
     sigmaRef.current?.refresh();
   }, [selectedTagId]);
+
+  // Animate edge threshold changes
+  const thresholdAnimRef = useRef<number | null>(null);
+  useEffect(() => {
+    const sigma = sigmaRef.current;
+    if (!sigma) {
+      edgeThresholdRef.current = edgeThreshold;
+      return;
+    }
+    const from = edgeThresholdRef.current;
+    const to = edgeThreshold;
+    if (Math.abs(from - to) < 0.001) return;
+
+    if (thresholdAnimRef.current) cancelAnimationFrame(thresholdAnimRef.current);
+    const start = performance.now();
+    const duration = 400;
+    function tick(now: number) {
+      const t = Math.min(1, (now - start) / duration);
+      const eased = 1 - (1 - t) ** 2; // ease out quad
+      edgeThresholdRef.current = from + (to - from) * eased;
+      sigma!.refresh();
+      if (t < 1) {
+        thresholdAnimRef.current = requestAnimationFrame(tick);
+      } else {
+        thresholdAnimRef.current = null;
+      }
+    }
+    thresholdAnimRef.current = requestAnimationFrame(tick);
+  }, [edgeThreshold]);
 
   return (
     <div className="flex flex-col h-full w-full">
@@ -350,33 +399,51 @@ export function SigmaCanvas() {
           style={{ minHeight: 200 }}
         />
 
-        {/* Theme picker */}
+        {/* Theme picker + edge slider */}
         {!isLoading && data && data.atoms.length > 0 && (
-          <div className="absolute bottom-4 left-4 z-20 flex items-center gap-1.5">
-            <button
-              onClick={() => setThemePickerOpen(!themePickerOpen)}
-              title="Change theme"
-              className="w-6 h-6 rounded-full border border-white/20 hover:border-white/40 transition-all flex-shrink-0"
-              style={{
-                background: `linear-gradient(135deg, rgb(${theme.nodeMin.join(',')}), rgb(${theme.nodeMax.join(',')}))`,
-              }}
-            />
-            <div
-              className={`flex gap-1.5 overflow-hidden transition-all duration-200 ${
-                themePickerOpen ? 'max-w-[200px] opacity-100' : 'max-w-0 opacity-0'
-              }`}
-            >
-              {CANVAS_THEMES.filter(t => t.id !== theme.id).map((t) => (
-                <button
-                  key={t.id}
-                  onClick={() => { setTheme(t); setThemePickerOpen(false); }}
-                  title={t.name}
-                  className="w-5 h-5 rounded-full border border-white/15 hover:border-white/40 transition-all flex-shrink-0"
-                  style={{
-                    background: `linear-gradient(135deg, rgb(${t.nodeMin.join(',')}), rgb(${t.nodeMax.join(',')}))`,
-                  }}
-                />
-              ))}
+          <div className="absolute bottom-4 left-4 z-20 flex flex-col gap-2">
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => setThemePickerOpen(!themePickerOpen)}
+                title="Change theme"
+                className="w-6 h-6 rounded-full border border-white/20 hover:border-white/40 transition-all flex-shrink-0"
+                style={{
+                  background: `linear-gradient(135deg, rgb(${theme.nodeMin.join(',')}), rgb(${theme.nodeMax.join(',')}))`,
+                }}
+              />
+              <div
+                className={`flex gap-1.5 overflow-hidden transition-all duration-200 ${
+                  themePickerOpen ? 'max-w-[200px] opacity-100' : 'max-w-0 opacity-0'
+                }`}
+              >
+                {CANVAS_THEMES.filter(t => t.id !== theme.id).map((t) => (
+                  <button
+                    key={t.id}
+                    onClick={() => { setTheme(t); setThemePickerOpen(false); }}
+                    title={t.name}
+                    className="w-5 h-5 rounded-full border border-white/15 hover:border-white/40 transition-all flex-shrink-0"
+                    style={{
+                      background: `linear-gradient(135deg, rgb(${t.nodeMin.join(',')}), rgb(${t.nodeMax.join(',')}))`,
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={(1 - edgeThreshold) * 100}
+                onChange={(e) => setEdgeThreshold(1 - Number(e.target.value) / 100)}
+                className="w-20 h-1 appearance-none bg-white/10 rounded-full cursor-pointer
+                  [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5
+                  [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white/60"
+                title={`Edges: ${Math.round((1 - edgeThreshold) * 100)}%`}
+              />
+              <span className="text-[9px] text-white/30">
+                {Math.round((1 - edgeThreshold) * 100)}%
+              </span>
             </div>
           </div>
         )}
