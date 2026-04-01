@@ -91,12 +91,14 @@ export function SigmaCanvas() {
     const maxEdges = Math.max(1, ...edgeCounts.values());
     graphDataRef.current = { edgeCounts, maxEdges };
 
-    // Add atom nodes
+    // Add atom nodes at center — will animate to PCA positions
+    const targetPositions: Record<string, { x: number; y: number }> = {};
     for (const atom of data.atoms) {
       const connectivity = (edgeCounts.get(atom.atom_id) || 0) / maxEdges;
+      targetPositions[atom.atom_id] = { x: atom.x * scale, y: atom.y * scale };
       graph.addNode(atom.atom_id, {
-        x: atom.x * scale,
-        y: atom.y * scale,
+        x: 0,
+        y: 0,
         size: 2.5 + connectivity * 5,
         color: nodeColor(theme, connectivity),
         label: truncLabel(atom.title || atom.atom_id.substring(0, 8), 30),
@@ -236,10 +238,18 @@ export function SigmaCanvas() {
       const placed: { x: number; y: number; w: number; h: number }[] = [];
 
       for (const cluster of sorted) {
-        const pos = sigma!.graphToViewport({
-          x: cluster.x * scale,
-          y: cluster.y * scale,
-        });
+        // Compute centroid from actual current node positions
+        let cx = 0, cy = 0, count = 0;
+        for (const atomId of cluster.atom_ids) {
+          if (!graph!.hasNode(atomId)) continue;
+          cx += graph!.getNodeAttribute(atomId, 'x') as number;
+          cy += graph!.getNodeAttribute(atomId, 'y') as number;
+          count++;
+        }
+        if (count === 0) continue;
+        cx /= count;
+        cy /= count;
+        const pos = sigma!.graphToViewport({ x: cx, y: cy });
 
         const labelY = pos.y - 20;
         const metrics = ctx.measureText(cluster.label);
@@ -277,24 +287,51 @@ export function SigmaCanvas() {
     sigma.on('afterRender', drawClusterLabels);
     requestAnimationFrame(drawClusterLabels);
 
-    // Animate edges fading in on first load
-    edgeAnimProgress.current = 0;
-    const animDuration = 3000;
-    const animStart = performance.now();
-    function animateEdges(now: number) {
-      const t = Math.min(1, (now - animStart) / animDuration);
-      const eased = 1 - (1 - t) ** 3; // ease out cubic
-      edgeAnimProgress.current = eased;
-      sigma.refresh();
-      if (t < 1) requestAnimationFrame(animateEdges);
+    // Lock the bounding box to the final layout so Sigma doesn't
+    // recompute normalization as nodes move from center outward
+    let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+    for (const pos of Object.values(targetPositions)) {
+      if (pos.x < xMin) xMin = pos.x;
+      if (pos.x > xMax) xMax = pos.x;
+      if (pos.y < yMin) yMin = pos.y;
+      if (pos.y > yMax) yMax = pos.y;
     }
-    requestAnimationFrame(animateEdges);
+    sigma.setCustomBBox({ x: [xMin, xMax], y: [yMin, yMax] });
+
+    // Animate nodes outward from center + fade edges in
+    edgeAnimProgress.current = 0;
+    const animStart = performance.now();
+    let cancelledAnim = false;
+    function animateTick(now: number) {
+      if (cancelledAnim) return;
+      const elapsed = now - animStart;
+
+      // Node positions: 0 → target over 2.5s, cubic ease-out
+      const nt = Math.min(1, elapsed / 2000);
+      const ne = 1 - (1 - nt) ** 3;
+      for (const [id, target] of Object.entries(targetPositions)) {
+        if (!graph.hasNode(id)) continue;
+        graph.setNodeAttribute(id, 'x', target.x * ne);
+        graph.setNodeAttribute(id, 'y', target.y * ne);
+      }
+
+      // Edge fade: 0 → 1 over 3s, ease-in
+      const et = Math.min(1, elapsed / 2500);
+      edgeAnimProgress.current = et * et;
+
+      if (nt < 1 || et < 1) {
+        requestAnimationFrame(animateTick);
+      }
+    }
+    requestAnimationFrame(animateTick);
+    const cancelAnim = () => { cancelledAnim = true; };
 
     sigma.on('clickNode', ({ node }) => {
       openDrawer('viewer', node);
     });
 
     return () => {
+      cancelAnim();
       sigma.kill();
       labelCanvas.remove();
       sigmaRef.current = null;
