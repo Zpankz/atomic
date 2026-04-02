@@ -2,9 +2,11 @@
  *  When a message arrives, the timer resets. After the window expires
  *  with no new messages, the callback fires to ingest the content. */
 
+type SettleCallback = () => void | Promise<void>;
+
 type SettleEntry = {
   timer: ReturnType<typeof setTimeout>;
-  callback: () => void;
+  callback: SettleCallback;
 };
 
 export class SettleManager {
@@ -12,7 +14,7 @@ export class SettleManager {
 
   /** Schedule (or reschedule) ingestion for a key.
    *  If a timer already exists for this key, it's reset. */
-  schedule(key: string, callback: () => void, delayMs: number): void {
+  schedule(key: string, callback: SettleCallback, delayMs: number): void {
     const existing = this.timers.get(key);
     if (existing) {
       clearTimeout(existing.timer);
@@ -20,7 +22,9 @@ export class SettleManager {
 
     const timer = setTimeout(() => {
       this.timers.delete(key);
-      callback();
+      Promise.resolve(callback()).catch((err) =>
+        console.error(`Settle callback error for ${key}:`, err),
+      );
     }, delayMs);
 
     this.timers.set(key, { timer, callback });

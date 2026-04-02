@@ -53,36 +53,44 @@ export function loadConfig(configPath: string): AppConfig {
     },
     ingestion: {
       reaction_emoji:
-        (ingestion.reaction_emoji as string) ??
-        DEFAULTS.ingestion.reaction_emoji,
+        str(ingestion.reaction_emoji) ?? DEFAULTS.ingestion.reaction_emoji,
       fallback_emoji:
-        (ingestion.fallback_emoji as string) ??
-        DEFAULTS.ingestion.fallback_emoji,
+        str(ingestion.fallback_emoji) ?? DEFAULTS.ingestion.fallback_emoji,
       default_settle_window:
-        (ingestion.default_settle_window as number) ??
+        num(ingestion.default_settle_window) ??
         DEFAULTS.ingestion.default_settle_window,
       default_mode:
-        (ingestion.default_mode as IngestionMode) ??
+        (str(ingestion.default_mode) as IngestionMode | null) ??
         DEFAULTS.ingestion.default_mode,
       include_bot_messages:
-        (ingestion.include_bot_messages as boolean) ??
+        bool(ingestion.include_bot_messages) ??
         DEFAULTS.ingestion.include_bot_messages,
       include_embeds:
-        (ingestion.include_embeds as boolean) ??
-        DEFAULTS.ingestion.include_embeds,
+        bool(ingestion.include_embeds) ?? DEFAULTS.ingestion.include_embeds,
       max_thread_depth:
-        (ingestion.max_thread_depth as number) ??
+        num(ingestion.max_thread_depth) ??
         DEFAULTS.ingestion.max_thread_depth,
       forum_tag_mapping:
-        (ingestion.forum_tag_mapping as boolean) ??
+        bool(ingestion.forum_tag_mapping) ??
         DEFAULTS.ingestion.forum_tag_mapping,
     },
     tags: {
-      auto_channel:
-        (tags.auto_channel as boolean) ?? DEFAULTS.tags.auto_channel,
-      auto_guild: (tags.auto_guild as boolean) ?? DEFAULTS.tags.auto_guild,
-      custom_prefix:
-        (tags.custom_prefix as string) ?? DEFAULTS.tags.custom_prefix,
+      auto_channel: bool(tags.auto_channel) ?? DEFAULTS.tags.auto_channel,
+      auto_guild: bool(tags.auto_guild) ?? DEFAULTS.tags.auto_guild,
+      custom_prefix: str(tags.custom_prefix) ?? DEFAULTS.tags.custom_prefix,
     },
   };
+}
+
+/** Type-safe extractors that return null for wrong types instead of truthy strings */
+function bool(v: unknown): boolean | null {
+  return typeof v === "boolean" ? v : null;
+}
+
+function str(v: unknown): string | null {
+  return typeof v === "string" ? v : null;
+}
+
+function num(v: unknown): number | null {
+  return typeof v === "number" ? v : null;
 }

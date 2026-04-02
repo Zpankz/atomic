@@ -26,17 +26,36 @@ export class Pipeline {
     // 3. Assemble atom body
     const body = formatAtomBody(msg);
 
-    // 4. Build tags
-    const tags = this.buildTags(msg);
+    // 4. Resolve tag names to IDs
+    const tagNames = this.buildTags(msg);
+    let tagIds: string[];
+    try {
+      tagIds = await this.client.resolveTagIds(tagNames);
+    } catch (err) {
+      console.warn("Tag resolution failed, proceeding without tags:", err);
+      tagIds = [];
+    }
 
     // 5. Create or update
     if (existing) {
-      // Thread growth — update existing atom
+      // Thread growth — update existing atom.
+      // Preserve existing tags by fetching current atom's tag IDs and merging.
       try {
+        let mergedTagIds = tagIds;
+        try {
+          const currentAtom = await this.client.getAtom(existing.atom_id);
+          const existingTagIds = currentAtom.tags.map((t) => t.id);
+          const tagSet = new Set([...existingTagIds, ...tagIds]);
+          mergedTagIds = [...tagSet];
+        } catch {
+          // If we can't fetch the existing atom, use our resolved tags only
+        }
+
         const atom = await this.client.updateAtom(existing.atom_id, {
           content: body,
           source_url: msg.permalink,
           published_at: msg.timestamp.toISOString(),
+          tag_ids: mergedTagIds,
         });
         storeDedup(this.db, key, atom.id);
         return { action: "updated", atom_id: atom.id };
@@ -55,6 +74,7 @@ export class Pipeline {
         content: body,
         source_url: msg.permalink,
         published_at: msg.timestamp.toISOString(),
+        tag_ids: tagIds,
       });
       storeDedup(this.db, key, atom.id);
       console.log(
@@ -70,7 +90,7 @@ export class Pipeline {
     }
   }
 
-  /** Build tag list from message metadata and config */
+  /** Build tag name list from message metadata and config */
   private buildTags(msg: NormalizedMessage): string[] {
     const tags: string[] = [];
     const prefix = this.config.tags.custom_prefix;

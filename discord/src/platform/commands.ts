@@ -3,9 +3,8 @@ import {
   type ChatInputCommandInteraction,
   SlashCommandBuilder,
   ChannelType,
-  type TextChannel,
-  type ForumChannel,
   type GuildChannel,
+  type ThreadChannel,
   REST,
   Routes,
   PermissionFlagsBits,
@@ -21,7 +20,6 @@ import {
   getAllActiveChannelConfigs,
 } from "../core/db.js";
 import { buildSingleMessage, buildThreadMessage } from "./messages.js";
-import { ChannelType as DiscordChannelType } from "discord.js";
 
 const VALID_MODES: IngestionMode[] = [
   "full",
@@ -305,20 +303,20 @@ async function handleSave(
 
   try {
     const channel = await interaction.client.channels.fetch(channelId);
-    if (!channel || !channel.isTextBased()) {
+    if (!channel || !channel.isTextBased() || !("messages" in channel)) {
       await interaction.editReply("Could not access that channel.");
       return;
     }
 
-    const message = await (channel as TextChannel).messages.fetch(messageId);
+    const message = await channel.messages.fetch(messageId);
 
     // Check if it's in a thread
     if (
-      channel.type === DiscordChannelType.PublicThread ||
-      channel.type === DiscordChannelType.PrivateThread
+      channel.type === ChannelType.PublicThread ||
+      channel.type === ChannelType.PrivateThread
     ) {
       const normalized = await buildThreadMessage(
-        channel as unknown as import("discord.js").ThreadChannel,
+        channel as ThreadChannel,
         config.ingestion.max_thread_depth,
       );
       if (normalized) {
@@ -367,9 +365,9 @@ async function handleSearch(
       .map((r, i) => {
         const title = r.title ?? "Untitled";
         const score = (r.similarity_score * 100).toFixed(0);
-        const snippet = r.matching_chunk_content
-          ? r.matching_chunk_content.slice(0, 150) + "..."
-          : "";
+        const chunk = r.matching_chunk_content ?? "";
+        const snippet =
+          chunk.length > 150 ? chunk.slice(0, 150) + "..." : chunk;
         return `**${i + 1}. ${title}** (${score}% match)\n${snippet}`;
       })
       .join("\n\n");

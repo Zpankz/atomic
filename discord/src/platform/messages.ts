@@ -1,6 +1,5 @@
 import {
   type Message,
-  type TextChannel,
   type ThreadChannel,
   type ForumChannel,
   type GuildChannel,
@@ -137,9 +136,15 @@ export async function buildThreadMessage(
 
 /** Build a NormalizedMessage for a single standalone message */
 export function buildSingleMessage(msg: Message): NormalizedMessage {
-  const channel = msg.channel as TextChannel;
-  const channelName = channel.name ?? "unknown";
-  const channelType = resolveChannelType(channel as GuildChannel);
+  const channel = msg.channel;
+  const channelName =
+    "name" in channel && typeof channel.name === "string"
+      ? channel.name
+      : "unknown";
+  const channelType =
+    "type" in channel
+      ? resolveChannelType(channel as GuildChannel)
+      : "text";
   const guildName = msg.guild?.name ?? "Unknown Server";
 
   return normalizeMessage(msg, channelName, channelType, guildName);

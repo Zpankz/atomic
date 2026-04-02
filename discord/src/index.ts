@@ -58,6 +58,7 @@ async function main() {
       Partials.Message,
       Partials.Reaction,
       Partials.Channel,
+      Partials.User,
     ],
   });
 
