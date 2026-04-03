@@ -33,9 +33,23 @@ pub async fn set_setting(
     let dimension_keys = ["provider", "embedding_model", "ollama_embedding_model", "openai_compat_embedding_model", "openai_compat_embedding_dimension"];
     if dimension_keys.contains(&key.as_str()) {
         let core = db.0;
+        let manager = state.manager.clone();
         let on_event = crate::event_bridge::embedding_event_callback(state.event_tx.clone());
         match web::block(move || {
-            core.set_setting_with_reembed(&key, &value, on_event)
+            let result = core.set_setting_with_reembed(&key, &value, on_event);
+            // If dimension changed, also recreate vector indexes on all other databases
+            if let Ok((true, _)) = &result {
+                let current_settings = core.get_settings().map_err(|e| {
+                    tracing::error!("Failed to get settings for dimension calc: {}", e);
+                    e
+                })?;
+                let config = atomic_core::providers::ProviderConfig::from_settings(&current_settings);
+                let new_dim = config.embedding_dimension();
+                if let Err(e) = manager.recreate_all_vector_indexes(new_dim) {
+                    tracing::error!("Failed to recreate vector indexes on other databases: {}", e);
+                }
+            }
+            result
         }).await {
             Ok(Ok((changed, count))) => HttpResponse::Ok().json(serde_json::json!({
                 "dimension_changed": changed,

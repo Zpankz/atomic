@@ -402,6 +402,30 @@ impl DatabaseManager {
         self.registry.set_default_database(id)
     }
 
+    /// Recreate vector indexes on all known databases with the given dimension.
+    /// This should be called when the embedding model changes so that non-active
+    /// databases also get their vec_chunks tables updated.
+    pub fn recreate_all_vector_indexes(&self, new_dim: usize) -> Result<(), AtomicCoreError> {
+        #[cfg(feature = "postgres")]
+        if self.is_postgres() {
+            // In Postgres mode, all databases share the same atom_chunks table,
+            // so recreating the index on any core covers all databases.
+            let storage = self.any_storage()?;
+            storage.recreate_vector_index_sync(new_dim)?;
+            return Ok(());
+        }
+
+        // SQLite: each database has its own vec_chunks table.
+        // Iterate all registered databases and recreate their vector indexes.
+        let databases = self.registry.list_databases()?;
+        for db_info in &databases {
+            let core = self.get_core(&db_info.id)?;
+            core.storage.recreate_vector_index_sync(new_dim)?;
+            tracing::info!(db_id = %db_info.id, db_name = %db_info.name, new_dim, "Recreated vector index");
+        }
+        Ok(())
+    }
+
     /// Optimize all loaded cores (call on shutdown).
     pub fn optimize_all(&self) {
         if let Ok(cores) = self.cores.read() {
