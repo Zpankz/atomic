@@ -686,6 +686,103 @@ impl WikiStore for PostgresStorage {
             )
             .collect())
     }
+
+    async fn save_wiki_proposal(&self, proposal: &WikiProposal) -> StorageResult<()> {
+        let citations_json = serde_json::to_string(&proposal.citations)
+            .map_err(|e| AtomicCoreError::Wiki(format!("Failed to serialize citations: {}", e)))?;
+        let ops_json = serde_json::to_string(&proposal.ops)
+            .map_err(|e| AtomicCoreError::Wiki(format!("Failed to serialize ops: {}", e)))?;
+
+        sqlx::query(
+            "INSERT INTO wiki_proposals
+                (id, db_id, tag_id, base_article_id, base_updated_at, content,
+                 citations_json, ops_json, new_atom_count, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (db_id, tag_id) DO UPDATE SET
+                id = excluded.id,
+                base_article_id = excluded.base_article_id,
+                base_updated_at = excluded.base_updated_at,
+                content = excluded.content,
+                citations_json = excluded.citations_json,
+                ops_json = excluded.ops_json,
+                new_atom_count = excluded.new_atom_count,
+                created_at = excluded.created_at",
+        )
+        .bind(&proposal.id)
+        .bind(&self.db_id)
+        .bind(&proposal.tag_id)
+        .bind(&proposal.base_article_id)
+        .bind(&proposal.base_updated_at)
+        .bind(&proposal.content)
+        .bind(&citations_json)
+        .bind(&ops_json)
+        .bind(proposal.new_atom_count)
+        .bind(&proposal.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn get_wiki_proposal(&self, tag_id: &str) -> StorageResult<Option<WikiProposal>> {
+        let row = sqlx::query_as::<
+            _,
+            (String, String, String, String, String, String, String, i32, String),
+        >(
+            "SELECT id, tag_id, base_article_id, base_updated_at, content,
+                    citations_json, ops_json, new_atom_count, created_at
+             FROM wiki_proposals
+             WHERE tag_id = $1 AND db_id = $2",
+        )
+        .bind(tag_id)
+        .bind(&self.db_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+
+        let Some((
+            id,
+            tag_id,
+            base_article_id,
+            base_updated_at,
+            content,
+            citations_json,
+            ops_json,
+            new_atom_count,
+            created_at,
+        )) = row
+        else {
+            return Ok(None);
+        };
+
+        let citations: Vec<WikiCitation> = serde_json::from_str(&citations_json)
+            .map_err(|e| AtomicCoreError::Wiki(format!("Failed to parse citations_json: {}", e)))?;
+        let ops: Vec<crate::wiki::WikiSectionOp> = serde_json::from_str(&ops_json)
+            .map_err(|e| AtomicCoreError::Wiki(format!("Failed to parse ops_json: {}", e)))?;
+
+        Ok(Some(WikiProposal {
+            id,
+            tag_id,
+            base_article_id,
+            base_updated_at,
+            content,
+            citations,
+            ops,
+            new_atom_count,
+            created_at,
+        }))
+    }
+
+    async fn delete_wiki_proposal(&self, tag_id: &str) -> StorageResult<()> {
+        sqlx::query("DELETE FROM wiki_proposals WHERE tag_id = $1 AND db_id = $2")
+            .bind(tag_id)
+            .bind(&self.db_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        Ok(())
+    }
 }
 
 // Private helper methods

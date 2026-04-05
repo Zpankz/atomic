@@ -84,6 +84,24 @@ export interface WikiArticleVersion {
   created_at: string;
 }
 
+export type WikiSectionOp =
+  | { op: 'NoChange' }
+  | { op: 'AppendToSection'; heading: string; content: string }
+  | { op: 'ReplaceSection'; heading: string; content: string }
+  | { op: 'InsertSection'; after_heading: string | null; heading: string; content: string };
+
+export interface WikiProposal {
+  id: string;
+  tag_id: string;
+  base_article_id: string;
+  base_updated_at: string;
+  content: string;
+  citations: WikiCitation[];
+  ops: WikiSectionOp[];
+  new_atom_count: number;
+  created_at: string;
+}
+
 type WikiView = 'list' | 'article';
 
 interface WikiStore {
@@ -109,6 +127,13 @@ interface WikiStore {
   // Version history
   versions: WikiVersionSummary[];
   selectedVersion: WikiArticleVersion | null;
+
+  // Proposal state (human-in-the-loop update review)
+  proposal: WikiProposal | null;
+  isProposing: boolean;
+  isAccepting: boolean;
+  isDismissing: boolean;
+  reviewingProposal: boolean;
 
   // Loading states
   isLoading: boolean;
@@ -138,6 +163,14 @@ interface WikiStore {
   clearArticle: () => void;
   clearError: () => void;
   reset: () => void;
+
+  // Proposal actions (human-in-the-loop update review)
+  fetchProposal: (tagId: string) => Promise<void>;
+  proposeArticle: (tagId: string, tagName: string) => Promise<void>;
+  acceptProposal: (tagId: string) => Promise<void>;
+  dismissProposal: (tagId: string) => Promise<void>;
+  startReviewingProposal: () => void;
+  stopReviewingProposal: () => void;
 }
 
 export const useWikiStore = create<WikiStore>((set, get) => ({
@@ -161,6 +194,11 @@ export const useWikiStore = create<WikiStore>((set, get) => ({
   wikiLinks: [],
   versions: [],
   selectedVersion: null,
+  proposal: null,
+  isProposing: false,
+  isAccepting: false,
+  isDismissing: false,
+  reviewingProposal: false,
   isLoading: false,
   isGenerating: false,
   isUpdating: false,
@@ -216,15 +254,18 @@ export const useWikiStore = create<WikiStore>((set, get) => ({
       wikiLinks: [],
       versions: [],
       selectedVersion: null,
+      proposal: null,
+      reviewingProposal: false,
       isLoading: true,
       error: null,
     });
-    // Fetch article, status, related tags, wiki links, and versions
+    // Fetch article, status, related tags, wiki links, versions, and proposal
     get().fetchArticle(tagId);
     get().fetchArticleStatus(tagId);
     get().fetchRelatedTags(tagId);
     get().fetchWikiLinks(tagId);
     get().fetchVersions(tagId);
+    get().fetchProposal(tagId);
   },
 
   // Open article view and immediately start generating (for new wikis)
@@ -351,6 +392,118 @@ export const useWikiStore = create<WikiStore>((set, get) => ({
     }
   },
 
+  // ==================== Proposal actions ====================
+
+  fetchProposal: async (tagId: string) => {
+    try {
+      const proposal = await getTransport().invoke<WikiProposal | null>('get_wiki_proposal', { tagId });
+      set({ proposal });
+    } catch (error) {
+      // 404 is expected when there's no pending proposal — don't toast.
+      const msg = String(error);
+      if (!msg.includes('No pending proposal')) {
+        console.error('Failed to fetch proposal:', error);
+      }
+      set({ proposal: null });
+    }
+  },
+
+  proposeArticle: async (tagId: string, tagName: string) => {
+    set({ isProposing: true, error: null });
+    try {
+      const result = await getTransport().invoke<WikiProposal | { status: string }>(
+        'propose_wiki_article',
+        { tagId, tagName }
+      );
+      if ('status' in result && result.status === 'no_update_needed') {
+        set({ isProposing: false, proposal: null });
+        toast.info('No update needed', {
+          id: 'wiki-propose-noop',
+          description: 'The new atoms don\'t warrant changes to the article.',
+        });
+        // Refresh status so the banner reflects the latest atom count.
+        get().fetchArticleStatus(tagId);
+      } else {
+        set({ proposal: result as WikiProposal, isProposing: false });
+        toast.success('Suggested update ready', {
+          id: 'wiki-proposal-ready',
+          description: 'Click Review to see what would change.',
+        });
+      }
+    } catch (error) {
+      set({ error: String(error), isProposing: false });
+      toast.error('Failed to generate update', {
+        id: 'wiki-propose-error',
+        description: String(error),
+      });
+    }
+  },
+
+  acceptProposal: async (tagId: string) => {
+    set({ isAccepting: true, error: null });
+    try {
+      const article = await getTransport().invoke<WikiArticleWithCitations>(
+        'accept_wiki_proposal',
+        { tagId }
+      );
+      set({
+        currentArticle: article,
+        proposal: null,
+        reviewingProposal: false,
+        isAccepting: false,
+      });
+      // Refresh dependent state after the live article changes.
+      get().fetchArticleStatus(tagId);
+      get().fetchRelatedTags(tagId);
+      get().fetchWikiLinks(tagId);
+      get().fetchVersions(tagId);
+      get().fetchAllArticles();
+      toast.success('Update applied');
+    } catch (error) {
+      const msg = String(error);
+      set({ isAccepting: false });
+      if (msg.includes('stale')) {
+        // Proposal was superseded / live article updated out-of-band.
+        set({ proposal: null, reviewingProposal: false });
+        toast.error('Proposal out of date', {
+          id: 'wiki-proposal-stale',
+          description: 'The article was updated elsewhere. Regenerate the suggestion to review it.',
+        });
+        get().fetchArticle(tagId);
+        get().fetchArticleStatus(tagId);
+      } else {
+        set({ error: msg });
+        toast.error('Failed to apply update', {
+          id: 'wiki-accept-error',
+          description: msg,
+        });
+      }
+    }
+  },
+
+  dismissProposal: async (tagId: string) => {
+    set({ isDismissing: true });
+    try {
+      await getTransport().invoke('dismiss_wiki_proposal', { tagId });
+      set({ proposal: null, reviewingProposal: false, isDismissing: false });
+      get().fetchArticleStatus(tagId);
+    } catch (error) {
+      set({ isDismissing: false });
+      toast.error('Failed to dismiss suggestion', {
+        id: 'wiki-dismiss-error',
+        description: String(error),
+      });
+    }
+  },
+
+  startReviewingProposal: () => {
+    set({ reviewingProposal: true });
+  },
+
+  stopReviewingProposal: () => {
+    set({ reviewingProposal: false });
+  },
+
   fetchVersions: async (tagId: string) => {
     try {
       const versions = await getTransport().invoke<WikiVersionSummary[]>('get_wiki_versions', { tagId });
@@ -376,7 +529,17 @@ export const useWikiStore = create<WikiStore>((set, get) => ({
   },
 
   clearArticle: () => {
-    set({ currentArticle: null, articleStatus: null, relatedTags: [], wikiLinks: [], versions: [], selectedVersion: null, error: null });
+    set({
+      currentArticle: null,
+      articleStatus: null,
+      relatedTags: [],
+      wikiLinks: [],
+      versions: [],
+      selectedVersion: null,
+      proposal: null,
+      reviewingProposal: false,
+      error: null,
+    });
   },
 
   clearError: () => {
@@ -398,6 +561,11 @@ export const useWikiStore = create<WikiStore>((set, get) => ({
       wikiLinks: [],
       versions: [],
       selectedVersion: null,
+      proposal: null,
+      isProposing: false,
+      isAccepting: false,
+      isDismissing: false,
+      reviewingProposal: false,
       isLoading: false,
       isGenerating: false,
       isUpdating: false,

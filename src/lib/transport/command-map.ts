@@ -197,6 +197,24 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     argsMode: 'body',
     transformArgs: (a) => ({ tag_name: a.tagName }),
   },
+  propose_wiki_article: {
+    method: 'POST',
+    path: (a) => `/api/wiki/${encodeURIComponent(a.tagId as string)}/propose`,
+    argsMode: 'body',
+    transformArgs: (a) => ({ tag_name: a.tagName }),
+  },
+  get_wiki_proposal: {
+    method: 'GET',
+    path: (a) => `/api/wiki/${encodeURIComponent(a.tagId as string)}/proposal`,
+  },
+  accept_wiki_proposal: {
+    method: 'POST',
+    path: (a) => `/api/wiki/${encodeURIComponent(a.tagId as string)}/proposal/accept`,
+  },
+  dismiss_wiki_proposal: {
+    method: 'POST',
+    path: (a) => `/api/wiki/${encodeURIComponent(a.tagId as string)}/proposal/dismiss`,
+  },
   delete_wiki_article: {
     method: 'DELETE',
     path: (a) => `/api/wiki/${encodeURIComponent(a.tagId as string)}`,

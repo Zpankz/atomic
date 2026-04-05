@@ -372,6 +372,12 @@ dispatch! {
         => sqlite: get_wiki_source_chunks_sync, pg_trait: WikiStore, pg_method: get_wiki_source_chunks;
     fn get_wiki_update_chunks_sync(&self, tag_id: &str, last_update: &str, max_source_tokens: usize) -> Result<Option<(Vec<ChunkWithContext>, i32)>, AtomicCoreError>
         => sqlite: get_wiki_update_chunks_sync, pg_trait: WikiStore, pg_method: get_wiki_update_chunks;
+    fn save_wiki_proposal_sync(&self, proposal: &WikiProposal) -> Result<(), AtomicCoreError>
+        => sqlite: save_wiki_proposal_sync, pg_trait: WikiStore, pg_method: save_wiki_proposal;
+    fn get_wiki_proposal_sync(&self, tag_id: &str) -> Result<Option<WikiProposal>, AtomicCoreError>
+        => sqlite: get_wiki_proposal_sync, pg_trait: WikiStore, pg_method: get_wiki_proposal;
+    fn delete_wiki_proposal_sync(&self, tag_id: &str) -> Result<(), AtomicCoreError>
+        => sqlite: delete_wiki_proposal_sync, pg_trait: WikiStore, pg_method: delete_wiki_proposal;
 
     // ---- FeedStore ----
     fn list_feeds_sync(&self) -> Result<Vec<Feed>, AtomicCoreError>

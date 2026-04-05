@@ -103,6 +103,12 @@ pub struct AtomicCore {
     /// When present, settings and token operations delegate to the shared registry.
     /// When absent (standalone use, tests), uses per-db tables as before.
     registry: Option<Arc<registry::Registry>>,
+    /// Per-tag locks to serialize wiki operations (update, propose, accept,
+    /// dismiss) against the same article. Prevents background + manual runs
+    /// from racing and ensures supersede semantics are consistent. Entries are
+    /// created lazily and persist for the lifetime of the process — the
+    /// working set is bounded by the number of wiki articles touched.
+    wiki_tag_locks: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl AtomicCore {
@@ -110,7 +116,11 @@ impl AtomicCore {
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self, AtomicCoreError> {
         let db = Arc::new(Database::open(db_path)?);
         let storage = storage::StorageBackend::Sqlite(storage::SqliteStorage::new(db));
-        Ok(Self { storage, registry: None })
+        Ok(Self {
+            storage,
+            registry: None,
+            wiki_tag_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        })
     }
 
     /// Open an existing database with a larger read pool sized for server workloads.
@@ -173,7 +183,11 @@ impl AtomicCore {
             }
         }
 
-        Ok(Self { storage, registry })
+        Ok(Self {
+            storage,
+            registry,
+            wiki_tag_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        })
     }
 
     /// Create an AtomicCore from an existing PostgresStorage (for multi-db in Postgres mode).
@@ -182,6 +196,7 @@ impl AtomicCore {
         Self {
             storage: storage::StorageBackend::Postgres(pg),
             registry: None,
+            wiki_tag_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -296,7 +311,11 @@ impl AtomicCore {
 
         let db = Arc::new(db);
         let storage = storage::StorageBackend::Sqlite(storage::SqliteStorage::new(db));
-        Ok(Self { storage, registry })
+        Ok(Self {
+            storage,
+            registry,
+            wiki_tag_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        })
     }
 
     /// Get settings map for passing to background tasks when registry is present.
@@ -811,12 +830,34 @@ impl AtomicCore {
         Ok(result)
     }
 
-    /// Update an existing wiki article with new content
+    /// Acquire the per-tag wiki lock. Serializes propose/accept/dismiss/update
+    /// operations against the same article so background + manual runs can't
+    /// race and proposals can't be applied mid-rewrite.
+    async fn wiki_tag_lock(&self, tag_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut map = self
+                .wiki_tag_locks
+                .lock()
+                .expect("wiki_tag_locks mutex poisoned");
+            map.entry(tag_id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        lock.lock_owned().await
+    }
+
+    /// Update an existing wiki article with new content (legacy full-rewrite path).
+    ///
+    /// Deprecated: prefer `propose_wiki_update` + `accept_wiki_proposal` for the
+    /// human-in-the-loop review flow. This method remains for backwards
+    /// compatibility with external MCP clients and will be removed in a later release.
     pub async fn update_wiki(
         &self,
         tag_id: &str,
         tag_name: &str,
     ) -> Result<WikiArticleWithCitations, AtomicCoreError> {
+        tracing::warn!(tag_id, "[wiki] update_wiki is deprecated; use propose_wiki_update instead");
+        let _guard = self.wiki_tag_lock(tag_id).await;
         tracing::info!(tag_name, tag_id, "[wiki] Updating article");
 
         let existing = self.get_wiki(tag_id)?
@@ -846,6 +887,152 @@ impl AtomicCore {
 
         tracing::info!("[wiki] Article updated successfully");
         Ok(result)
+    }
+
+    /// Propose an update to an existing wiki article.
+    ///
+    /// Runs the strategy's chunk selector, then the shared section-ops
+    /// generator, and writes the result to `wiki_proposals`. Supersedes any
+    /// existing pending proposal for the tag. Returns `None` when the strategy
+    /// determines no update is warranted (no new atoms, or the LLM returned
+    /// NoChange).
+    pub async fn propose_wiki_update(
+        &self,
+        tag_id: &str,
+        tag_name: &str,
+    ) -> Result<Option<WikiProposal>, AtomicCoreError> {
+        let _guard = self.wiki_tag_lock(tag_id).await;
+        tracing::info!(tag_name, tag_id, "[wiki] Proposing article update");
+
+        let existing = self.get_wiki(tag_id)?.ok_or_else(|| {
+            AtomicCoreError::Wiki("No existing article to propose update against".to_string())
+        })?;
+
+        let (strategy, ctx) = self.build_wiki_strategy_context(tag_id, tag_name)?;
+
+        let draft = match wiki::strategy_propose(&strategy, &ctx, &existing)
+            .await
+            .map_err(|e| AtomicCoreError::Wiki(e))?
+        {
+            Some(d) => d,
+            None => {
+                tracing::info!(tag_id, "[wiki] No update warranted; no proposal created");
+                return Ok(None);
+            }
+        };
+
+        let proposal = WikiProposal {
+            id: uuid::Uuid::new_v4().to_string(),
+            tag_id: tag_id.to_string(),
+            base_article_id: existing.article.id.clone(),
+            base_updated_at: existing.article.updated_at.clone(),
+            content: draft.merged_content,
+            citations: draft.citations,
+            ops: draft.ops,
+            new_atom_count: draft.new_atom_count,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+
+        self.storage.save_wiki_proposal_sync(&proposal)?;
+        tracing::info!(
+            tag_id,
+            proposal_id = %proposal.id,
+            ops = proposal.ops.len(),
+            "[wiki] Proposal saved"
+        );
+
+        Ok(Some(proposal))
+    }
+
+    /// Get the pending wiki proposal for a tag, if any.
+    pub fn get_wiki_proposal(
+        &self,
+        tag_id: &str,
+    ) -> Result<Option<WikiProposal>, AtomicCoreError> {
+        self.storage.get_wiki_proposal_sync(tag_id)
+    }
+
+    /// Accept the pending wiki proposal: promote to live article, archive the
+    /// prior version, delete the proposal row.
+    ///
+    /// Rejects the accept if the live article has been updated out-of-band
+    /// since the proposal was computed (stale base). The caller should catch
+    /// this error, refetch, and ask the user to regenerate the proposal.
+    pub async fn accept_wiki_proposal(
+        &self,
+        tag_id: &str,
+    ) -> Result<WikiArticleWithCitations, AtomicCoreError> {
+        let _guard = self.wiki_tag_lock(tag_id).await;
+
+        let proposal = self.storage.get_wiki_proposal_sync(tag_id)?.ok_or_else(|| {
+            AtomicCoreError::Wiki("No pending proposal for this tag".to_string())
+        })?;
+
+        let existing = self.get_wiki(tag_id)?.ok_or_else(|| {
+            AtomicCoreError::Wiki("Live article disappeared while proposal was pending".to_string())
+        })?;
+
+        if existing.article.updated_at != proposal.base_updated_at
+            || existing.article.id != proposal.base_article_id
+        {
+            tracing::warn!(
+                tag_id,
+                base = %proposal.base_updated_at,
+                live = %existing.article.updated_at,
+                "[wiki] Stale proposal — live article was updated out-of-band"
+            );
+            return Err(AtomicCoreError::Wiki(
+                "Proposal is stale — live article was updated since the proposal was computed. Regenerate the proposal to review it.".to_string(),
+            ));
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let article = WikiArticle {
+            id: existing.article.id.clone(),
+            tag_id: tag_id.to_string(),
+            content: proposal.content.clone(),
+            created_at: existing.article.created_at.clone(),
+            updated_at: now,
+            atom_count: existing.article.atom_count + proposal.new_atom_count,
+        };
+
+        // Extract wiki links from the merged content. Build the linkable-
+        // article-names list the same way build_wiki_strategy_context does.
+        const MAX_CROSS_LINK_TAGS: usize = 50;
+        let related = self
+            .storage
+            .get_related_tags_impl(tag_id, MAX_CROSS_LINK_TAGS)
+            .unwrap_or_default();
+        let linkable_names: Vec<(String, String)> = related
+            .into_iter()
+            .filter(|t| t.has_article)
+            .map(|t| (t.tag_id, t.tag_name))
+            .collect();
+        let wiki_links =
+            wiki::extract_wiki_links(&article.id, &article.content, &linkable_names);
+
+        // save_wiki_with_links archives the previous version into
+        // wiki_article_versions as part of its normal flow.
+        self.storage
+            .save_wiki_with_links_sync(&article, &proposal.citations, &wiki_links)?;
+
+        // Delete the proposal row after successful save.
+        self.storage.delete_wiki_proposal_sync(tag_id)?;
+
+        tracing::info!(tag_id, "[wiki] Proposal accepted and promoted to live article");
+
+        Ok(WikiArticleWithCitations {
+            article,
+            citations: proposal.citations,
+        })
+    }
+
+    /// Dismiss the pending wiki proposal (delete without promoting). Idempotent.
+    pub async fn dismiss_wiki_proposal(&self, tag_id: &str) -> Result<(), AtomicCoreError> {
+        let _guard = self.wiki_tag_lock(tag_id).await;
+        self.storage.delete_wiki_proposal_sync(tag_id)?;
+        tracing::info!(tag_id, "[wiki] Proposal dismissed");
+        Ok(())
     }
 
     /// Get an existing wiki article

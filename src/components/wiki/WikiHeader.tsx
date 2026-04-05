@@ -18,6 +18,11 @@ interface WikiHeaderProps {
   onSelectVersion: (versionId: string) => void;
   isViewingVersion: boolean;
   onReturnToCurrent: () => void;
+  // Proposal review state
+  hasProposal: boolean;
+  isProposing: boolean;
+  proposalAtomCount: number;
+  onReviewProposal: () => void;
 }
 
 export function WikiHeader({
@@ -34,6 +39,10 @@ export function WikiHeader({
   onSelectVersion,
   isViewingVersion,
   onReturnToCurrent,
+  hasProposal,
+  isProposing,
+  proposalAtomCount,
+  onReviewProposal,
 }: WikiHeaderProps) {
   const [showRegenerateModal, setShowRegenerateModal] = useState(false);
   const [showVersions, setShowVersions] = useState(false);
@@ -164,8 +173,27 @@ export function WikiHeader({
         </div>
       </div>
 
-      {/* New atoms banner */}
-      {newAtomsAvailable > 0 && !isViewingVersion && (
+      {/* Proposal ready banner — takes precedence over the new-atoms banner */}
+      {hasProposal && !isViewingVersion && (
+        <div className="flex items-center justify-between px-6 py-2 bg-[var(--color-accent)]/15 border-t border-[var(--color-accent)]/30">
+          <span className="text-sm text-[var(--color-accent-light)]">
+            Suggested update ready
+            {proposalAtomCount > 0 && (
+              <> — based on {proposalAtomCount} new atom{proposalAtomCount !== 1 ? 's' : ''}</>
+            )}
+          </span>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={onReviewProposal}
+          >
+            Review
+          </Button>
+        </div>
+      )}
+
+      {/* New atoms banner — only when no proposal is pending */}
+      {!hasProposal && newAtomsAvailable > 0 && !isViewingVersion && (
         <div className="flex items-center justify-between px-6 py-2 bg-[var(--color-accent)]/10 border-t border-[var(--color-accent)]/20">
           <span className="text-sm text-[var(--color-accent-light)]">
             {newAtomsAvailable} new atom{newAtomsAvailable !== 1 ? 's' : ''} available
@@ -174,18 +202,18 @@ export function WikiHeader({
             variant="primary"
             size="sm"
             onClick={onUpdate}
-            disabled={isUpdating}
+            disabled={isProposing || isUpdating}
           >
-            {isUpdating ? (
+            {isProposing ? (
               <>
                 <svg className="w-3 h-3 mr-1 animate-spin" fill="none" viewBox="0 0 24 24">
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                 </svg>
-                Updating...
+                Generating...
               </>
             ) : (
-              'Update Article'
+              'Generate update'
             )}
           </Button>
         </div>
