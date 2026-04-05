@@ -185,6 +185,34 @@ pub struct WikiArticleWithCitations {
     pub citations: Vec<WikiCitation>,
 }
 
+/// A pending proposal to update a wiki article.
+///
+/// Proposals are transient: at most one exists per `tag_id` at a time.
+/// Supersede = INSERT OR REPLACE. Accept promotes to `wiki_articles` (via the
+/// normal save path, which archives the prior version into
+/// `wiki_article_versions`) and deletes the proposal row. Dismiss just deletes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct WikiProposal {
+    pub id: String,
+    pub tag_id: String,
+    /// `wiki_articles.id` this was computed from — used to detect staleness on accept.
+    pub base_article_id: String,
+    /// `wiki_articles.updated_at` at propose time. If the live article's
+    /// `updated_at` has moved past this value by the time the user accepts,
+    /// the proposal is stale and the accept is rejected.
+    pub base_updated_at: String,
+    /// The merged article content (applier output).
+    pub content: String,
+    /// Citations extracted from `content`.
+    pub citations: Vec<WikiCitation>,
+    /// The section operations the LLM emitted, stored for debuggability.
+    pub ops: Vec<crate::wiki::WikiSectionOp>,
+    /// Number of new atoms incorporated into the proposal.
+    pub new_atom_count: i32,
+    pub created_at: String,
+}
+
 /// Status of a wiki article for quick checks
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

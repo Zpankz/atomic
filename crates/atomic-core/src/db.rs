@@ -575,6 +575,28 @@ impl Database {
             )?;
         }
 
+        // --- V8 → V9: Wiki proposals (human-in-the-loop update review) ---
+        if version < 9 {
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS wiki_proposals (
+                    id              TEXT PRIMARY KEY,
+                    tag_id          TEXT UNIQUE NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+                    base_article_id TEXT NOT NULL,
+                    base_updated_at TEXT NOT NULL,
+                    content         TEXT NOT NULL,
+                    citations_json  TEXT NOT NULL,
+                    ops_json        TEXT NOT NULL,
+                    new_atom_count  INTEGER NOT NULL,
+                    created_at      TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_wiki_proposals_tag_id ON wiki_proposals(tag_id);
+
+                PRAGMA user_version = 9;
+                "#,
+            )?;
+        }
+
         // --- Triggers (recreated every startup to stay current) ---
         conn.execute_batch(
             "DROP TRIGGER IF EXISTS atom_tags_insert_count;

@@ -5,6 +5,7 @@ import { WikiHeader } from './WikiHeader';
 import { WikiEmptyState } from './WikiEmptyState';
 import { WikiGenerating } from './WikiGenerating';
 import { WikiArticleContent } from './WikiArticleContent';
+import { WikiProposalDiff } from './WikiProposalDiff';
 
 interface WikiViewerProps {
   tagId: string;
@@ -31,11 +32,22 @@ export function WikiViewer({ tagId, tagName }: WikiViewerProps) {
   const selectVersion = useWikiStore(s => s.selectVersion);
   const clearSelectedVersion = useWikiStore(s => s.clearSelectedVersion);
   const generateArticle = useWikiStore(s => s.generateArticle);
-  const updateArticle = useWikiStore(s => s.updateArticle);
   const openArticle = useWikiStore(s => s.openArticle);
   const clearArticle = useWikiStore(s => s.clearArticle);
   const fetchAllArticles = useWikiStore(s => s.fetchAllArticles);
   const clearError = useWikiStore(s => s.clearError);
+  // Proposal state + actions
+  const proposal = useWikiStore(s => s.proposal);
+  const isProposing = useWikiStore(s => s.isProposing);
+  const isAccepting = useWikiStore(s => s.isAccepting);
+  const isDismissing = useWikiStore(s => s.isDismissing);
+  const reviewingProposal = useWikiStore(s => s.reviewingProposal);
+  const fetchProposal = useWikiStore(s => s.fetchProposal);
+  const proposeArticle = useWikiStore(s => s.proposeArticle);
+  const acceptProposal = useWikiStore(s => s.acceptProposal);
+  const dismissProposal = useWikiStore(s => s.dismissProposal);
+  const startReviewingProposal = useWikiStore(s => s.startReviewingProposal);
+  const stopReviewingProposal = useWikiStore(s => s.stopReviewingProposal);
 
   const closeDrawer = useUIStore(s => s.closeDrawer);
   const openDrawer = useUIStore(s => s.openDrawer);
@@ -45,6 +57,7 @@ export function WikiViewer({ tagId, tagName }: WikiViewerProps) {
     fetchArticle(tagId);
     fetchArticleStatus(tagId);
     fetchVersions(tagId);
+    fetchProposal(tagId);
     // Ensure articles list is available for implicit back-linking
     if (articles.length === 0) {
       fetchAllArticles();
@@ -54,7 +67,7 @@ export function WikiViewer({ tagId, tagName }: WikiViewerProps) {
     return () => {
       clearArticle();
     };
-  }, [tagId, fetchArticle, fetchArticleStatus, fetchVersions, clearArticle, articles.length, fetchAllArticles]);
+  }, [tagId, fetchArticle, fetchArticleStatus, fetchVersions, fetchProposal, clearArticle, articles.length, fetchAllArticles]);
 
   // Only fetch related tags and wiki links when an article exists
   useEffect(() => {
@@ -69,7 +82,25 @@ export function WikiViewer({ tagId, tagName }: WikiViewerProps) {
   };
 
   const handleUpdate = () => {
-    updateArticle(tagId, tagName);
+    // The button that used to call update_wiki_article now generates a proposal
+    // that the user reviews before it becomes live.
+    proposeArticle(tagId, tagName);
+  };
+
+  const handleReviewProposal = () => {
+    startReviewingProposal();
+  };
+
+  const handleAcceptProposal = () => {
+    acceptProposal(tagId);
+  };
+
+  const handleDismissProposal = () => {
+    dismissProposal(tagId);
+  };
+
+  const handleCancelReview = () => {
+    stopReviewingProposal();
   };
 
   const handleRegenerate = () => {
@@ -217,17 +248,35 @@ export function WikiViewer({ tagId, tagName }: WikiViewerProps) {
         onSelectVersion={selectVersion}
         isViewingVersion={!!selectedVersion}
         onReturnToCurrent={clearSelectedVersion}
+        hasProposal={!!proposal && !selectedVersion}
+        isProposing={isProposing}
+        proposalAtomCount={proposal?.new_atom_count || 0}
+        onReviewProposal={handleReviewProposal}
       />
-      <div className="flex-1 overflow-y-auto">
-        <WikiArticleContent
-          article={displayArticle}
-          citations={displayCitations}
-          wikiLinks={selectedVersion ? [] : wikiLinks}
-          relatedTags={selectedVersion ? [] : relatedTags}
-          onViewAtom={handleViewAtom}
-          onNavigateToArticle={handleNavigateToArticle}
+      {reviewingProposal && proposal && !selectedVersion ? (
+        <WikiProposalDiff
+          liveContent={currentArticle.article.content}
+          proposalContent={proposal.content}
+          newAtomCount={proposal.new_atom_count}
+          createdAt={proposal.created_at}
+          onAccept={handleAcceptProposal}
+          onDismiss={handleDismissProposal}
+          onCancel={handleCancelReview}
+          isAccepting={isAccepting}
+          isDismissing={isDismissing}
         />
-      </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto">
+          <WikiArticleContent
+            article={displayArticle}
+            citations={displayCitations}
+            wikiLinks={selectedVersion ? [] : wikiLinks}
+            relatedTags={selectedVersion ? [] : relatedTags}
+            onViewAtom={handleViewAtom}
+            onNavigateToArticle={handleNavigateToArticle}
+          />
+        </div>
+      )}
     </div>
   );
 }

@@ -6,6 +6,9 @@
 
 mod agentic;
 pub(crate) mod centroid;
+pub mod section_ops;
+
+pub use section_ops::{apply_section_ops, WikiSectionOp, WikiSectionOpWire};
 
 use crate::models::{
     ChunkWithContext, RelatedTag, SuggestedArticle, WikiArticle, WikiArticleSummary,
@@ -20,7 +23,7 @@ use crate::storage::StorageBackend;
 use chrono::Utc;
 use regex::Regex;
 use rusqlite::Connection;
-use serde::Deserialize;
+use serde::{de::DeserializeOwned, Deserialize};
 use uuid::Uuid;
 
 // ==================== Strategy Types ====================
@@ -94,6 +97,382 @@ pub async fn strategy_update(
     }
 }
 
+/// Draft of a wiki update, produced by the propose path.
+///
+/// The applier has already been run — `merged_content` is the final article
+/// text ready to diff and save. `ops` is retained for debuggability.
+pub struct WikiProposalDraft {
+    pub ops: Vec<WikiSectionOp>,
+    pub merged_content: String,
+    pub citations: Vec<WikiCitation>,
+    pub new_atom_count: i32,
+}
+
+/// Propose an update to an existing wiki article using the given strategy.
+///
+/// Composes two independent steps:
+///
+/// 1. Strategy-specific chunk selection (`select_update_chunks`): for Centroid,
+///    new atoms since `existing.updated_at`; for Agentic, the research loop
+///    with the existing article as context and already-cited chunks filtered out.
+/// 2. Strategy-agnostic section-ops generation (`generate_section_ops_proposal`):
+///    shared across strategies — the LLM emits a list of section operations, the
+///    applier merges them into the existing content, and citations are extracted
+///    from the merged output.
+///
+/// Returns `None` if no update is warranted (no new atoms, empty ops, or the
+/// LLM returns `NoChange`).
+pub async fn strategy_propose(
+    strategy: &WikiStrategy,
+    ctx: &WikiStrategyContext,
+    existing: &WikiArticleWithCitations,
+) -> Result<Option<WikiProposalDraft>, String> {
+    let Some((new_chunks, total_atom_count)) = select_update_chunks(strategy, ctx, existing).await?
+    else {
+        return Ok(None);
+    };
+
+    // New-atom count is the delta against the baseline the live article was
+    // built from. Matches the convention used by `get_wiki_status` and the
+    // "N new atoms available" banner. Clamp to zero in case atoms were deleted
+    // since the last accepted version.
+    let new_atom_count = (total_atom_count - existing.article.atom_count).max(0);
+
+    generate_section_ops_proposal(ctx, existing, &new_chunks, new_atom_count).await
+}
+
+/// Strategy-specific chunk selection for the propose path.
+async fn select_update_chunks(
+    strategy: &WikiStrategy,
+    ctx: &WikiStrategyContext,
+    existing: &WikiArticleWithCitations,
+) -> Result<Option<(Vec<ChunkWithContext>, i32)>, String> {
+    match strategy {
+        WikiStrategy::Centroid => {
+            // New atoms since the article's last updated_at, centroid-ranked.
+            ctx.storage
+                .get_wiki_update_chunks_sync(
+                    &ctx.tag_id,
+                    &existing.article.updated_at,
+                    ctx.max_source_tokens(),
+                )
+                .map_err(|e| e.to_string())
+        }
+        WikiStrategy::Agentic => {
+            // Run the research loop with the existing article as context, then
+            // filter out chunks already cited in the existing article so we
+            // only propose updates for net-new material.
+            agentic::research_for_update(ctx, existing, true).await
+        }
+    }
+}
+
+/// Structured result from the section-ops LLM call. Deserializes the flat
+/// wire shape emitted by the structured-output schema; the generator then
+/// calls `WikiSectionOpWire::into_op()` on each entry to validate and convert
+/// to the strict `WikiSectionOp` enum.
+#[derive(Debug, Deserialize)]
+pub(crate) struct WikiUpdateOpsResult {
+    pub operations: Vec<WikiSectionOpWire>,
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub citations_used: Vec<i32>,
+}
+
+/// JSON Schema for `WikiUpdateOpsResult`.
+///
+/// Design constraints dictated by multi-provider support:
+///
+/// - **No `oneOf` discriminated unions.** OpenAI strict mode supports them
+///   but some OpenRouter-routed providers and local models fall back oddly.
+/// - **No nullable unions (`["string", "null"]`).** OpenAI/Anthropic handle
+///   these, but smaller local models via Ollama are unreliable.
+/// - **All fields required, all strings.** Empty string `""` is the sentinel
+///   for "not applicable" — same convention as `extraction.rs` which is
+///   proven to work across every provider in this codebase.
+/// - **`additionalProperties: false`.** Required by OpenAI strict mode.
+///
+/// The LLM emits the flat shape; `WikiSectionOpWire::into_op()` validates
+/// and converts to the strict `WikiSectionOp` enum.
+fn section_ops_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "operations": {
+                "type": "array",
+                "description": "List of section operations to apply to the article, in order. Return a single operation with op=\"NoChange\" if nothing needs to change.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "op": {
+                            "type": "string",
+                            "enum": ["NoChange", "AppendToSection", "ReplaceSection", "InsertSection"],
+                            "description": "Operation type."
+                        },
+                        "heading": {
+                            "type": "string",
+                            "description": "For AppendToSection/ReplaceSection: exact existing heading to target. For InsertSection: the new section's heading. For NoChange: empty string."
+                        },
+                        "after_heading": {
+                            "type": "string",
+                            "description": "For InsertSection only: exact existing heading to insert AFTER, or empty string to append at end of article. For all other ops: empty string."
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "New markdown content for the operation. For NoChange: empty string."
+                        }
+                    },
+                    "required": ["op", "heading", "after_heading", "content"],
+                    "additionalProperties": false
+                }
+            },
+            "citations_used": {
+                "type": "array",
+                "items": { "type": "integer" },
+                "description": "List of citation numbers referenced across the operations."
+            }
+        },
+        "required": ["operations", "citations_used"],
+        "additionalProperties": false
+    })
+}
+
+/// Shared, strategy-agnostic section-ops generation.
+///
+/// Given the existing article and a set of new chunks, ask the LLM for a list
+/// of structured section operations, apply them via the section_ops applier,
+/// and extract citations from the merged result.
+async fn generate_section_ops_proposal(
+    ctx: &WikiStrategyContext,
+    existing: &WikiArticleWithCitations,
+    new_chunks: &[ChunkWithContext],
+    new_atom_count: i32,
+) -> Result<Option<WikiProposalDraft>, String> {
+    // Build existing sources block (for the LLM to reference by citation number).
+    let mut existing_sources = String::new();
+    for citation in &existing.citations {
+        existing_sources.push_str(&format!(
+            "[{}] {}\n\n",
+            citation.citation_index, citation.excerpt
+        ));
+    }
+
+    // Build new sources block, continuing citation numbering.
+    //
+    // Start AFTER the largest existing citation index, not after `len()`.
+    // Existing citations can have gaps (the LLM doesn't always use every index
+    // it's offered, and dead indices aren't backfilled). Using `len + 1` can
+    // collide with preserved high-index markers like `[47]` that survive in
+    // untouched sections.
+    let start_index = existing
+        .citations
+        .iter()
+        .map(|c| c.citation_index)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let mut new_sources = String::new();
+    for (i, chunk) in new_chunks.iter().enumerate() {
+        new_sources.push_str(&format!(
+            "[{}] {}\n\n",
+            start_index + i as i32,
+            chunk.content
+        ));
+    }
+
+    // Build existing-articles list for cross-linking (matches the full-rewrite flow).
+    let articles_section = if ctx.linkable_article_names.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<&str> = ctx
+            .linkable_article_names
+            .iter()
+            .filter(|(tid, _)| tid != &ctx.tag_id)
+            .map(|(_, name)| name.as_str())
+            .collect();
+        if names.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\nEXISTING WIKI ARTICLES IN THIS KNOWLEDGE BASE:\n{}\n",
+                names.join(", ")
+            )
+        }
+    };
+
+    // Enumerate current section headings for the LLM to reference verbatim.
+    let heading_list = extract_current_headings(&existing.article.content);
+    let headings_block = if heading_list.is_empty() {
+        "(no ## headings — the article has no sections yet; use InsertSection with after_heading=\"\" to add one at the end)".to_string()
+    } else {
+        heading_list
+            .iter()
+            .map(|h| format!("- {}", h))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let user_content = format!(
+        "CURRENT ARTICLE:\n{}\n\n\
+         CURRENT SECTION HEADINGS (use these values verbatim in your operations — do not paraphrase):\n{}\n\n\
+         EXISTING SOURCES (already cited in the article — reuse these indices verbatim if you reference them):\n{}\n\
+         NEW SOURCES TO INCORPORATE (cite as [{}] onwards):\n{}{}\n\
+         Return structured section operations that incorporate the new sources into the article.{}",
+        existing.article.content,
+        headings_block,
+        existing_sources,
+        start_index,
+        new_sources,
+        articles_section,
+        if articles_section.is_empty() {
+            ""
+        } else {
+            " Use [[Article Name]] to link to other articles listed above where relevant."
+        }
+    );
+
+    let result: WikiUpdateOpsResult = call_llm_for_wiki_typed(
+        &ctx.provider_config,
+        WIKI_UPDATE_SECTION_OPS_PROMPT,
+        &user_content,
+        &ctx.wiki_model,
+        "wiki_update_section_ops",
+        section_ops_schema(),
+    )
+    .await?;
+
+    // Convert the flat wire shape into the strict enum, validating required
+    // fields per variant. Any invalid op (unknown discriminator, missing
+    // required field) aborts the whole proposal — same posture as a
+    // hallucinated heading.
+    let ops: Vec<WikiSectionOp> = result
+        .operations
+        .into_iter()
+        .map(|wire| wire.into_op())
+        .collect::<Result<Vec<_>, String>>()
+        .map_err(|e| {
+            tracing::warn!(error = %e, "[wiki] Section-ops LLM returned an invalid operation");
+            format!("LLM returned an invalid section operation: {}", e)
+        })?;
+
+    // No-op detection: empty ops, all NoChange, or a single NoChange.
+    let has_meaningful_op = ops.iter().any(|o| !matches!(o, WikiSectionOp::NoChange));
+    if !has_meaningful_op {
+        tracing::info!("[wiki] Proposal LLM returned no-change; nothing to propose");
+        return Ok(None);
+    }
+
+    // Apply ops to the existing content. Hallucinated heading → error propagates.
+    let merged_content = apply_section_ops(&existing.article.content, &ops).map_err(|e| {
+        tracing::warn!(error = %e, "[wiki] Section ops applier failed");
+        e
+    })?;
+
+    // Resolve citation markers in the merged content by explicit index lookup.
+    //
+    // The legacy full-rewrite path uses `extract_citations` with positional
+    // mapping (`[N]` → `chunks[N-1]`), which only works when the article's
+    // citations happen to be contiguous 1..N. Section-ops preserves original
+    // `[N]` markers byte-for-byte in untouched sections, so any gap in the
+    // existing citation indices (e.g. `[4] [6] [15] [47]`) would either collide
+    // with the new-source numbering or silently drop high-index markers. We
+    // build an explicit `index → source` map instead: existing citations map
+    // to themselves (preserving atom_id / chunk_index / excerpt), and new
+    // chunks map to the indices we assigned them in the prompt.
+    let existing_by_index: std::collections::HashMap<i32, &WikiCitation> = existing
+        .citations
+        .iter()
+        .map(|c| (c.citation_index, c))
+        .collect();
+    let new_by_index: std::collections::HashMap<i32, &ChunkWithContext> = new_chunks
+        .iter()
+        .enumerate()
+        .map(|(i, chunk)| (start_index + i as i32, chunk))
+        .collect();
+
+    let marker_re = Regex::new(r"\[(\d+)\]").map_err(|e| format!("regex: {}", e))?;
+    let mut seen: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    let mut citations: Vec<WikiCitation> = Vec::new();
+    for cap in marker_re.captures_iter(&merged_content) {
+        let index: i32 = match cap.get(1).and_then(|m| m.as_str().parse().ok()) {
+            Some(n) => n,
+            None => continue,
+        };
+        if !seen.insert(index) {
+            continue;
+        }
+        if let Some(existing_citation) = existing_by_index.get(&index) {
+            // Preserve the original citation unchanged — same atom, same
+            // chunk, same excerpt. Just mint a fresh row id for the new
+            // wiki_citations insert on accept.
+            citations.push(WikiCitation {
+                id: Uuid::new_v4().to_string(),
+                citation_index: index,
+                atom_id: existing_citation.atom_id.clone(),
+                chunk_index: existing_citation.chunk_index,
+                excerpt: existing_citation.excerpt.clone(),
+            });
+        } else if let Some(chunk) = new_by_index.get(&index) {
+            let excerpt = if chunk.content.len() > 300 {
+                let truncate_pos = chunk
+                    .content
+                    .char_indices()
+                    .take_while(|(i, _)| *i < 297)
+                    .last()
+                    .map(|(i, c)| i + c.len_utf8())
+                    .unwrap_or(0);
+                format!("{}...", &chunk.content[..truncate_pos])
+            } else {
+                chunk.content.clone()
+            };
+            citations.push(WikiCitation {
+                id: Uuid::new_v4().to_string(),
+                citation_index: index,
+                atom_id: chunk.atom_id.clone(),
+                chunk_index: Some(chunk.chunk_index),
+                excerpt,
+            });
+        } else {
+            tracing::warn!(
+                citation_index = index,
+                "[wiki] Merged article references citation with no known source — dropping from citation list"
+            );
+        }
+    }
+    citations.sort_by_key(|c| c.citation_index);
+
+    Ok(Some(WikiProposalDraft {
+        ops,
+        merged_content,
+        citations,
+        new_atom_count,
+    }))
+}
+
+/// Extract the exact text of all `##` (level 2) headings in an article, in
+/// document order. Used to tell the LLM which headings it can target.
+///
+/// Only level 2 is returned because `apply_section_ops` / `parse_sections` in
+/// `section_ops.rs` only treat `##` as a section boundary — `###` and deeper
+/// stay embedded in their parent section's body. Surfacing `###` headings to
+/// the LLM would let it target a heading the applier can't resolve, which
+/// discards the entire proposal as a hallucination.
+fn extract_current_headings(content: &str) -> Vec<String> {
+    let mut headings = Vec::new();
+    for line in content.lines() {
+        let stripped = line.trim_start();
+        let bytes = stripped.as_bytes();
+        let mut hashes = 0;
+        while hashes < bytes.len() && bytes[hashes] == b'#' {
+            hashes += 1;
+        }
+        if hashes == 2 && hashes < bytes.len() && bytes[hashes] == b' ' {
+            headings.push(stripped[hashes + 1..].trim().to_string());
+        }
+    }
+    headings
+}
+
 // ==================== Shared Constants ====================
 
 /// Maximum source material tokens for wiki generation.
@@ -128,6 +507,26 @@ Guidelines:
 - Only use [[wiki links]] for topics listed in the EXISTING WIKI ARTICLES section provided
 - Do not force wiki links where they don't fit naturally"#;
 
+pub(crate) const WIKI_UPDATE_SECTION_OPS_PROMPT: &str = r#"You are proposing updates to an existing wiki article based on new sources.
+
+Return a list of structured operations that incorporate the new information while leaving untouched sections exactly as they are.
+
+Every operation is an object with four fields: op, heading, after_heading, content. All four fields MUST be present in every operation. Use empty strings ("") for fields that don't apply to the chosen op.
+
+Operations (value of the `op` field):
+- "NoChange": the new sources don't warrant updating the article. Use empty strings for heading, after_heading, and content. Return this as the ONLY operation in the list if nothing needs to change.
+- "AppendToSection": add new material to the end of an existing section. Set `heading` to the exact existing section heading. Set `content` to the new markdown to append. Leave `after_heading` as an empty string.
+- "ReplaceSection": rewrite a section's body (use sparingly — only when existing content is directly contradicted or superseded). Set `heading` to the exact existing section heading. Set `content` to the new body. Leave `after_heading` as an empty string.
+- "InsertSection": add a brand-new section (use only for genuinely new topics not covered elsewhere). Set `heading` to the new section's heading. Set `after_heading` to the exact existing heading you want to insert AFTER, or leave it empty ("") to append the new section at the end of the article. Set `content` to the new section body.
+
+Rules:
+- `heading` and `after_heading` values must EXACTLY match one of the headings listed under CURRENT SECTION HEADINGS when they reference existing sections. Do not paraphrase, reword, or change capitalization. Do not include the ## prefix.
+- Prefer AppendToSection over ReplaceSection. Prefer editing an existing section over creating a new one.
+- Every new factual claim MUST have a [N] citation using the next-available citation numbers shown in the user message.
+- Keep tone consistent with the existing article.
+- When mentioning topics that have their own wiki articles, use [[Topic Name]] notation — only for topics listed in EXISTING WIKI ARTICLES.
+- Never omit the heading, after_heading, or content fields. Use "" when they don't apply."#;
+
 // ==================== Shared LLM Infrastructure ====================
 
 #[derive(Deserialize)]
@@ -137,16 +536,14 @@ pub(crate) struct WikiGenerationResult {
     pub citations_used: Vec<i32>,
 }
 
-/// Call LLM provider for wiki generation
+/// Call LLM provider for wiki generation (full-article rewrite schema).
+/// Thin wrapper over `call_llm_for_wiki_typed`.
 pub(crate) async fn call_llm_for_wiki(
     provider_config: &ProviderConfig,
     system_prompt: &str,
     user_content: &str,
     model: &str,
 ) -> Result<WikiGenerationResult, String> {
-    let input_chars = user_content.len();
-    tracing::info!(model, input_chars, "[wiki] Starting generation");
-
     let schema = serde_json::json!({
         "type": "object",
         "properties": {
@@ -164,15 +561,36 @@ pub(crate) async fn call_llm_for_wiki(
         "additionalProperties": false
     });
 
+    call_llm_for_wiki_typed::<WikiGenerationResult>(
+        provider_config,
+        system_prompt,
+        user_content,
+        model,
+        "wiki_generation_result",
+        schema,
+    )
+    .await
+}
+
+/// Generic LLM call for wiki operations. Callers provide the JSON schema and
+/// the result type; retry/parse/error handling is shared.
+pub(crate) async fn call_llm_for_wiki_typed<T: DeserializeOwned>(
+    provider_config: &ProviderConfig,
+    system_prompt: &str,
+    user_content: &str,
+    model: &str,
+    schema_name: &str,
+    schema: serde_json::Value,
+) -> Result<T, String> {
+    let input_chars = user_content.len();
+    tracing::info!(model, input_chars, schema = %schema_name, "[wiki] Starting generation");
+
     let messages = vec![Message::system(system_prompt), Message::user(user_content)];
 
     let llm_config = LlmConfig::new(model).with_params(
         GenerationParams::new()
             .with_temperature(0.3)
-            .with_structured_output(StructuredOutputSchema::new(
-                "wiki_generation_result",
-                schema,
-            )),
+            .with_structured_output(StructuredOutputSchema::new(schema_name, schema)),
     );
 
     let provider = get_llm_provider(provider_config).map_err(|e| e.to_string())?;
@@ -201,9 +619,8 @@ pub(crate) async fn call_llm_for_wiki(
                 }
 
                 // Parse the structured JSON response
-                match serde_json::from_str::<WikiGenerationResult>(content) {
+                match serde_json::from_str::<T>(content) {
                     Ok(result) => {
-                        tracing::info!(article_chars = result.article_content.len(), citations = result.citations_used.len(), "[wiki] Successfully parsed article");
                         return Ok(result);
                     }
                     Err(parse_err) => {

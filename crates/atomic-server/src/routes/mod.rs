@@ -62,6 +62,19 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
         web::post().to(wiki::generate_wiki),
     );
     cfg.route("/wiki/{tag_id}/update", web::post().to(wiki::update_wiki));
+    cfg.route("/wiki/{tag_id}/propose", web::post().to(wiki::propose_wiki));
+    cfg.route(
+        "/wiki/{tag_id}/proposal",
+        web::get().to(wiki::get_wiki_proposal),
+    );
+    cfg.route(
+        "/wiki/{tag_id}/proposal/accept",
+        web::post().to(wiki::accept_wiki_proposal),
+    );
+    cfg.route(
+        "/wiki/{tag_id}/proposal/dismiss",
+        web::post().to(wiki::dismiss_wiki_proposal),
+    );
     cfg.route("/wiki/{tag_id}", web::delete().to(wiki::delete_wiki));
     cfg.route(
         "/wiki/{tag_id}/related",

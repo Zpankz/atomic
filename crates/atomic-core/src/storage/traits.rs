@@ -558,6 +558,15 @@ pub trait WikiStore: Send + Sync {
         last_update: &str,
         max_source_tokens: usize,
     ) -> StorageResult<Option<(Vec<ChunkWithContext>, i32)>>;
+
+    /// Save a wiki proposal (upsert — supersedes any existing proposal for the tag).
+    async fn save_wiki_proposal(&self, proposal: &WikiProposal) -> StorageResult<()>;
+
+    /// Get the pending wiki proposal for a tag, if any.
+    async fn get_wiki_proposal(&self, tag_id: &str) -> StorageResult<Option<WikiProposal>>;
+
+    /// Delete the pending wiki proposal for a tag (idempotent).
+    async fn delete_wiki_proposal(&self, tag_id: &str) -> StorageResult<()>;
 }
 
 // ==================== Feed Storage ====================

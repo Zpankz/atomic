@@ -6,6 +6,7 @@ import { WikiHeader } from './WikiHeader';
 import { WikiEmptyState } from './WikiEmptyState';
 import { WikiGenerating } from './WikiGenerating';
 import { WikiArticleContent } from './WikiArticleContent';
+import { WikiProposalDiff } from './WikiProposalDiff';
 
 export function WikiListViewer() {
   const view = useWikiStore(s => s.view);
@@ -22,10 +23,21 @@ export function WikiListViewer() {
   const fetchAllArticles = useWikiStore(s => s.fetchAllArticles);
   const goBack = useWikiStore(s => s.goBack);
   const generateArticle = useWikiStore(s => s.generateArticle);
-  const updateArticle = useWikiStore(s => s.updateArticle);
   const openArticle = useWikiStore(s => s.openArticle);
   const reset = useWikiStore(s => s.reset);
   const clearError = useWikiStore(s => s.clearError);
+
+  // Proposal state + actions
+  const proposal = useWikiStore(s => s.proposal);
+  const isProposing = useWikiStore(s => s.isProposing);
+  const isAccepting = useWikiStore(s => s.isAccepting);
+  const isDismissing = useWikiStore(s => s.isDismissing);
+  const reviewingProposal = useWikiStore(s => s.reviewingProposal);
+  const proposeArticle = useWikiStore(s => s.proposeArticle);
+  const acceptProposal = useWikiStore(s => s.acceptProposal);
+  const dismissProposal = useWikiStore(s => s.dismissProposal);
+  const startReviewingProposal = useWikiStore(s => s.startReviewingProposal);
+  const stopReviewingProposal = useWikiStore(s => s.stopReviewingProposal);
 
   const versions = useWikiStore(s => s.versions);
   const selectedVersion = useWikiStore(s => s.selectedVersion);
@@ -58,8 +70,28 @@ export function WikiListViewer() {
 
   const handleUpdate = () => {
     if (currentTagId && currentTagName) {
-      updateArticle(currentTagId, currentTagName);
+      proposeArticle(currentTagId, currentTagName);
     }
+  };
+
+  const handleReviewProposal = () => {
+    startReviewingProposal();
+  };
+
+  const handleAcceptProposal = () => {
+    if (currentTagId) {
+      acceptProposal(currentTagId);
+    }
+  };
+
+  const handleDismissProposal = () => {
+    if (currentTagId) {
+      dismissProposal(currentTagId);
+    }
+  };
+
+  const handleCancelReview = () => {
+    stopReviewingProposal();
   };
 
   const handleRegenerate = () => {
@@ -277,17 +309,35 @@ export function WikiListViewer() {
         onSelectVersion={selectVersion}
         isViewingVersion={!!selectedVersion}
         onReturnToCurrent={clearSelectedVersion}
+        hasProposal={!!proposal && !selectedVersion}
+        isProposing={isProposing}
+        proposalAtomCount={proposal?.new_atom_count || 0}
+        onReviewProposal={handleReviewProposal}
       />
-      <div className="flex-1 overflow-y-auto">
-        <WikiArticleContent
-          article={displayArticle}
-          citations={displayCitations}
-          wikiLinks={selectedVersion ? [] : wikiLinks}
-          relatedTags={selectedVersion ? [] : relatedTags}
-          onViewAtom={handleViewAtom}
-          onNavigateToArticle={(tagId, tagName) => openArticle(tagId, tagName)}
+      {reviewingProposal && proposal && !selectedVersion ? (
+        <WikiProposalDiff
+          liveContent={currentArticle.article.content}
+          proposalContent={proposal.content}
+          newAtomCount={proposal.new_atom_count}
+          createdAt={proposal.created_at}
+          onAccept={handleAcceptProposal}
+          onDismiss={handleDismissProposal}
+          onCancel={handleCancelReview}
+          isAccepting={isAccepting}
+          isDismissing={isDismissing}
         />
-      </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto">
+          <WikiArticleContent
+            article={displayArticle}
+            citations={displayCitations}
+            wikiLinks={selectedVersion ? [] : wikiLinks}
+            relatedTags={selectedVersion ? [] : relatedTags}
+            onViewAtom={handleViewAtom}
+            onNavigateToArticle={(tagId, tagName) => openArticle(tagId, tagName)}
+          />
+        </div>
+      )}
     </div>
   );
 }
