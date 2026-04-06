@@ -91,19 +91,29 @@ export function SigmaCanvas() {
     const maxEdges = Math.max(1, ...edgeCounts.values());
     graphDataRef.current = { edgeCounts, maxEdges };
 
+    // Build atom → cluster index map
+    const atomCluster = new Map<string, number>();
+    for (let i = 0; i < data.clusters.length; i++) {
+      for (const atomId of data.clusters[i].atom_ids) {
+        atomCluster.set(atomId, i);
+      }
+    }
+
     // Add atom nodes at center — will animate to PCA positions
     const targetPositions: Record<string, { x: number; y: number }> = {};
     for (const atom of data.atoms) {
       const connectivity = (edgeCounts.get(atom.atom_id) || 0) / maxEdges;
+      const clusterIdx = atomCluster.get(atom.atom_id);
       targetPositions[atom.atom_id] = { x: atom.x * scale, y: atom.y * scale };
       graph.addNode(atom.atom_id, {
         x: 0,
         y: 0,
         size: 2.5 + connectivity * 5,
-        color: nodeColor(theme, connectivity),
+        color: nodeColor(theme, connectivity, clusterIdx),
         label: truncLabel(atom.title || atom.atom_id.substring(0, 8), 30),
         fullLabel: atom.title || atom.atom_id.substring(0, 8),
         connectivity,
+        clusterIndex: clusterIdx,
         tagIds: atom.tag_ids,
       });
     }
@@ -348,9 +358,9 @@ export function SigmaCanvas() {
     const { edgeCounts, maxEdges } = graphDataRef.current;
 
     // Update node colors
-    graph.forEachNode((node) => {
+    graph.forEachNode((node, attrs) => {
       const connectivity = (edgeCounts.get(node) || 0) / maxEdges;
-      graph.setNodeAttribute(node, 'color', nodeColor(theme, connectivity));
+      graph.setNodeAttribute(node, 'color', nodeColor(theme, connectivity, (attrs as any).clusterIndex));
     });
 
     // Update sigma label color setting
