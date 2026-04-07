@@ -454,7 +454,7 @@ function AtomReaderContent({
                   onClick={(e) => { e.preventDefault(); openExternalUrl(atom.source_url!).catch(console.error); }}
                   className="inline-block text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-accent)] bg-[var(--color-bg-card)] px-2 py-0.5 rounded-full cursor-pointer transition-colors"
                 >
-                  {atom.source || new URL(atom.source_url).hostname.replace(/^www\./, '')}
+                  {atom.source || (() => { try { return new URL(atom.source_url!).hostname.replace(/^www\./, ''); } catch { return atom.source_url; } })()}
                 </a>
               </div>
             )}

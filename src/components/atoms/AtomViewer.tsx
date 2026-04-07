@@ -17,7 +17,7 @@ import { formatDate } from '../../lib/date';
 import { chunkMarkdown, findChunkIndexForOffset } from '../../lib/markdown';
 
 // Benchmarking helper
-const PERF_DEBUG = true;
+const PERF_DEBUG = false;
 const perfLog = (label: string, startTime?: number) => {
   if (!PERF_DEBUG) return;
   if (startTime !== undefined) {
