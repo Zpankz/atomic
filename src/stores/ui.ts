@@ -34,10 +34,26 @@ interface CanvasNavState {
   isLoading: boolean;
 }
 
+interface ReaderState {
+  atomId: string | null;
+  highlightText: string | null;
+}
+
+type OverlayNavEntry =
+  | { type: 'reader'; atomId: string; highlightText?: string | null }
+  | { type: 'graph'; atomId: string }
+
+interface OverlayNav {
+  stack: OverlayNavEntry[];
+  index: number; // -1 = no overlay open
+}
+
 interface UIStore {
   selectedTagId: string | null;
   expandedTagIds: Record<string, boolean>;  // Tags that should be expanded in sidebar
   drawerState: DrawerState;
+  readerState: ReaderState;
+  overlayNav: OverlayNav;
   viewMode: ViewMode;
   searchQuery: string;
   loadingOperations: LoadingOperation[];
@@ -52,6 +68,8 @@ interface UIStore {
   // Command palette state
   commandPaletteOpen: boolean;
   commandPaletteInitialQuery: string;
+  // Reader theme
+  readerTheme: 'light' | 'dark';
   // Canvas navigation state
   canvasNav: CanvasNavState;
   // Actions
@@ -63,6 +81,12 @@ interface UIStore {
   setSelectedTag: (tagId: string | null) => void;
   expandTagPath: (tagIds: string[]) => void;  // Expand all tags in path
   toggleTagExpanded: (tagId: string) => void;
+  openReader: (atomId: string, highlightText?: string) => void;
+  closeReader: () => void;
+  overlayNavigate: (entry: OverlayNavEntry) => void;
+  overlayBack: () => void;
+  overlayForward: () => void;
+  overlayDismiss: () => void;
   openDrawer: (mode: DrawerMode, atomId?: string, highlightText?: string) => void;
   openWikiDrawer: (tagId: string, tagName: string) => void;
   openWikiListDrawer: () => void;
@@ -83,6 +107,8 @@ interface UIStore {
   openCommandPalette: (initialQuery?: string) => void;
   closeCommandPalette: () => void;
   toggleCommandPalette: () => void;
+  setReaderTheme: (theme: 'light' | 'dark') => void;
+  toggleReaderTheme: () => void;
   // Canvas navigation actions
   navigateCanvas: (parentId: string | null, childrenHint?: string[]) => Promise<void>;
 }
@@ -101,6 +127,14 @@ export const useUIStore = create<UIStore>()(
         conversationId: null,
         highlightText: null,
       },
+      readerState: {
+        atomId: null,
+        highlightText: null,
+      },
+      overlayNav: {
+        stack: [],
+        index: -1,
+      },
       viewMode: 'grid',
       searchQuery: '',
       loadingOperations: [],
@@ -116,6 +150,7 @@ export const useUIStore = create<UIStore>()(
       serverConnected: false,
       commandPaletteOpen: false,
       commandPaletteInitialQuery: '',
+      readerTheme: 'dark' as 'light' | 'dark',
       canvasNav: {
         currentLevel: null,
         isLoading: false,
@@ -145,6 +180,100 @@ export const useUIStore = create<UIStore>()(
             [tagId]: !state.expandedTagIds[tagId],
           },
         })),
+
+      openReader: (atomId: string, highlightText?: string) => {
+        const entry: OverlayNavEntry = { type: 'reader', atomId, highlightText };
+        set((state) => {
+          const stack = state.overlayNav.stack.slice(0, state.overlayNav.index + 1);
+          stack.push(entry);
+          return {
+            readerState: { atomId, highlightText: highlightText || null },
+            overlayNav: { stack, index: stack.length - 1 },
+          };
+        });
+      },
+
+      closeReader: () =>
+        set({
+          readerState: { atomId: null, highlightText: null },
+          overlayNav: { stack: [], index: -1 },
+        }),
+
+      overlayNavigate: (entry: OverlayNavEntry) =>
+        set((state) => {
+          const stack = state.overlayNav.stack.slice(0, state.overlayNav.index + 1);
+          stack.push(entry);
+          const index = stack.length - 1;
+          // Sync readerState and localGraph based on entry type
+          if (entry.type === 'reader') {
+            return {
+              overlayNav: { stack, index },
+              readerState: { atomId: entry.atomId, highlightText: entry.highlightText || null },
+              localGraph: { ...state.localGraph, isOpen: false },
+            };
+          } else {
+            return {
+              overlayNav: { stack, index },
+              readerState: { atomId: null, highlightText: null },
+              localGraph: { isOpen: true, centerAtomId: entry.atomId, depth: 1, navigationHistory: [entry.atomId] },
+            };
+          }
+        }),
+
+      overlayBack: () =>
+        set((state) => {
+          const newIndex = state.overlayNav.index - 1;
+          if (newIndex < 0) {
+            // Nothing to go back to — dismiss
+            return {
+              overlayNav: { stack: [], index: -1 },
+              readerState: { atomId: null, highlightText: null },
+              localGraph: { ...state.localGraph, isOpen: false },
+            };
+          }
+          const entry = state.overlayNav.stack[newIndex];
+          if (entry.type === 'reader') {
+            return {
+              overlayNav: { ...state.overlayNav, index: newIndex },
+              readerState: { atomId: entry.atomId, highlightText: entry.highlightText || null },
+              localGraph: { ...state.localGraph, isOpen: false },
+            };
+          } else {
+            return {
+              overlayNav: { ...state.overlayNav, index: newIndex },
+              readerState: { atomId: null, highlightText: null },
+              localGraph: { isOpen: true, centerAtomId: entry.atomId, depth: 1, navigationHistory: [entry.atomId] },
+            };
+          }
+        }),
+
+      overlayForward: () =>
+        set((state) => {
+          const newIndex = state.overlayNav.index + 1;
+          if (newIndex >= state.overlayNav.stack.length) return {};
+          const entry = state.overlayNav.stack[newIndex];
+          if (entry.type === 'reader') {
+            return {
+              overlayNav: { ...state.overlayNav, index: newIndex },
+              readerState: { atomId: entry.atomId, highlightText: entry.highlightText || null },
+              localGraph: { ...state.localGraph, isOpen: false },
+            };
+          } else {
+            return {
+              overlayNav: { ...state.overlayNav, index: newIndex },
+              readerState: { atomId: null, highlightText: null },
+              localGraph: { isOpen: true, centerAtomId: entry.atomId, depth: 1, navigationHistory: [entry.atomId] },
+            };
+          }
+        }),
+
+      overlayDismiss: () =>
+        set((state) => ({
+          overlayNav: { stack: [], index: -1 },
+          readerState: { atomId: null, highlightText: null },
+          localGraph: { ...state.localGraph, isOpen: false },
+        })),
+
 
       openDrawer: (mode: DrawerMode, atomId?: string, highlightText?: string) =>
         set({
@@ -207,7 +336,10 @@ export const useUIStore = create<UIStore>()(
           },
         })),
 
-      setViewMode: (mode: ViewMode) => set({ viewMode: mode }),
+      setViewMode: (mode: ViewMode) => set({
+        viewMode: mode,
+        leftPanelOpen: mode !== 'wiki',
+      }),
 
       setSearchQuery: (query: string) => set({ searchQuery: query }),
 
@@ -295,6 +427,9 @@ export const useUIStore = create<UIStore>()(
           commandPaletteInitialQuery: state.commandPaletteOpen ? '' : state.commandPaletteInitialQuery
         })),
 
+      setReaderTheme: (theme: 'light' | 'dark') => set({ readerTheme: theme }),
+      toggleReaderTheme: () => set((state) => ({ readerTheme: state.readerTheme === 'dark' ? 'light' : 'dark' })),
+
       navigateCanvas: async (parentId: string | null, childrenHint?: string[]) => {
         set({ canvasNav: { currentLevel: null, isLoading: true } });
         try {
@@ -308,7 +443,7 @@ export const useUIStore = create<UIStore>()(
     }),
     {
       name: 'atomic-ui-storage',
-      partialize: (state) => ({ viewMode: state.viewMode }),  // Only persist viewMode
+      partialize: (state) => ({ viewMode: state.viewMode, readerTheme: state.readerTheme }),
     }
   )
 );

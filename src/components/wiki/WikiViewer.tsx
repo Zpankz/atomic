@@ -50,7 +50,7 @@ export function WikiViewer({ tagId, tagName }: WikiViewerProps) {
   const stopReviewingProposal = useWikiStore(s => s.stopReviewingProposal);
 
   const closeDrawer = useUIStore(s => s.closeDrawer);
-  const openDrawer = useUIStore(s => s.openDrawer);
+  const openReader = useUIStore(s => s.openReader);
 
   // Fetch article and status when component mounts or tagId changes
   useEffect(() => {
@@ -108,7 +108,7 @@ export function WikiViewer({ tagId, tagName }: WikiViewerProps) {
   };
 
   const handleViewAtom = (atomId: string) => {
-    openDrawer('viewer', atomId);
+    openReader(atomId);
   };
 
   const handleNavigateToArticle = (targetTagId: string, targetTagName: string) => {

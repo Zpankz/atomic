@@ -18,7 +18,7 @@ export function ChatView() {
   const sendMessage = useChatStore(s => s.sendMessage);
   const goBack = useChatStore(s => s.goBack);
 
-  const openDrawer = useUIStore(s => s.openDrawer);
+  const openReader = useUIStore(s => s.openReader);
 
   const [inputValue, setInputValue] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -106,8 +106,8 @@ export function ChatView() {
 
   // Handle viewing an atom from citation - switch drawer to viewer mode
   const handleViewAtom = useCallback((atomId: string) => {
-    openDrawer('viewer', atomId);
-  }, [openDrawer]);
+    openReader(atomId);
+  }, [openReader]);
 
   if (!currentConversation) {
     return (

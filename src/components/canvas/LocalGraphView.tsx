@@ -27,13 +27,15 @@ interface LocalGraphViewProps {
   onAtomClick: (atomId: string) => void;
 }
 
-export function LocalGraphView({ onAtomClick }: LocalGraphViewProps) {
+export function LocalGraphView({ onAtomClick: _onAtomClick }: LocalGraphViewProps) {
   const localGraph = useUIStore(s => s.localGraph);
   const navigateLocalGraph = useUIStore(s => s.navigateLocalGraph);
   const goBackLocalGraph = useUIStore(s => s.goBackLocalGraph);
-  const closeLocalGraph = useUIStore(s => s.closeLocalGraph);
   const setLocalGraphDepth = useUIStore(s => s.setLocalGraphDepth);
-  const openDrawer = useUIStore(s => s.openDrawer);
+  const overlayNavigate = useUIStore(s => s.overlayNavigate);
+  const overlayBack = useUIStore(s => s.overlayBack);
+  const overlayDismiss = useUIStore(s => s.overlayDismiss);
+  const overlayNav = useUIStore(s => s.overlayNav);
   const [graph, setGraph] = useState<NeighborhoodGraph | null>(null);
   const [nodes, setNodes] = useState<SimulationNode[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -131,18 +133,18 @@ export function LocalGraphView({ onAtomClick }: LocalGraphViewProps) {
 
   const handleNodeClick = useCallback((atomId: string) => {
     if (atomId === localGraph.centerAtomId) {
-      // Clicking center atom opens it in drawer
-      onAtomClick(atomId);
+      // Clicking center atom opens it in reader
+      overlayNavigate({ type: 'reader', atomId });
     } else {
       // Clicking other atoms navigates to them
       navigateLocalGraph(atomId);
     }
-  }, [localGraph.centerAtomId, navigateLocalGraph, onAtomClick]);
+  }, [localGraph.centerAtomId, navigateLocalGraph, overlayNavigate]);
 
   const handleNodeDoubleClick = useCallback((atomId: string) => {
-    // Double-click always opens in drawer
-    openDrawer('viewer', atomId);
-  }, [openDrawer]);
+    // Double-click always opens in reader
+    overlayNavigate({ type: 'reader', atomId });
+  }, [overlayNavigate]);
 
   if (!localGraph.isOpen) return null;
 
@@ -151,15 +153,38 @@ export function LocalGraphView({ onAtomClick }: LocalGraphViewProps) {
       {/* Header */}
       <div className={`flex items-center justify-between px-4 py-3 border-b border-[var(--color-border)] ${isTauri() ? 'pl-[78px]' : ''}`} data-tauri-drag-region>
         <div className="flex items-center gap-3">
-          {/* Back button */}
+          {/* Overlay back/forward */}
+          <div className="flex items-center gap-1">
+            <button
+              onClick={overlayBack}
+              disabled={overlayNav.index <= 0}
+              className={`p-1.5 rounded-md transition-colors ${overlayNav.index > 0 ? 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]' : 'text-[var(--color-text-tertiary)] cursor-default'}`}
+              title="Back"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+              </svg>
+            </button>
+            <button
+              onClick={overlayNav.index < overlayNav.stack.length - 1 ? () => useUIStore.getState().overlayForward() : undefined}
+              disabled={overlayNav.index >= overlayNav.stack.length - 1}
+              className={`p-1.5 rounded-md transition-colors ${overlayNav.index < overlayNav.stack.length - 1 ? 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)]' : 'text-[var(--color-text-tertiary)] cursor-default'}`}
+              title="Forward"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+              </svg>
+            </button>
+          </div>
+          {/* Graph-internal back */}
           {localGraph.navigationHistory.length > 1 && (
             <button
               onClick={goBackLocalGraph}
               className="p-1.5 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]"
-              title="Go back"
+              title="Previous node"
             >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a5 5 0 015 5v2M3 10l4-4M3 10l4 4" />
               </svg>
             </button>
           )}
@@ -169,6 +194,19 @@ export function LocalGraphView({ onAtomClick }: LocalGraphViewProps) {
         </div>
 
         <div className="flex items-center gap-4">
+          {/* Read center atom */}
+          {localGraph.centerAtomId && (
+            <button
+              onClick={() => overlayNavigate({ type: 'reader', atomId: localGraph.centerAtomId! })}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-bg-hover)] transition-colors"
+              title="Read this atom"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+              </svg>
+              Read
+            </button>
+          )}
           {/* Depth toggle */}
           <div className="flex items-center gap-2 text-sm">
             <span className="text-[var(--color-text-secondary)]">Depth:</span>
@@ -186,9 +224,9 @@ export function LocalGraphView({ onAtomClick }: LocalGraphViewProps) {
             </button>
           </div>
 
-          {/* Close button */}
+          {/* Dismiss button */}
           <button
-            onClick={closeLocalGraph}
+            onClick={overlayDismiss}
             className="p-1.5 rounded hover:bg-[var(--color-bg-hover)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]"
             title="Close"
           >

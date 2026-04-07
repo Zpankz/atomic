@@ -20,7 +20,7 @@ export function HierarchicalCanvas() {
     }))
   );
   const navigateCanvas = useUIStore(s => s.navigateCanvas);
-  const openDrawer = useUIStore(s => s.openDrawer);
+  const openReader = useUIStore(s => s.openReader);
   const selectedTagId = useUIStore(s => s.selectedTagId);
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -104,17 +104,17 @@ export function HierarchicalCanvas() {
 
   const handleNodeClick = useCallback((node: CanvasNode) => {
     if (node.node_type === 'atom') {
-      openDrawer('viewer', node.id);
+      openReader(node.id);
     } else if (node.node_type === 'semantic_cluster') {
       navigateCanvas(node.id, node.children_ids);
     } else {
       navigateCanvas(node.id);
     }
-  }, [navigateCanvas, openDrawer]);
+  }, [navigateCanvas, openReader]);
 
   const handleAtomNodeClick = useCallback((atomId: string) => {
-    openDrawer('viewer', atomId);
-  }, [openDrawer]);
+    openReader(atomId);
+  }, [openReader]);
 
   // Build node position map for edge rendering
   const nodePositionMap = useMemo(() => {

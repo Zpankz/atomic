@@ -48,7 +48,6 @@ export function AtomViewer({ atom, onClose, onEdit, highlightText }: AtomViewerP
   const fetchTags = useTagsStore(s => s.fetchTags);
   const setSelectedTag = useUIStore(s => s.setSelectedTag);
   const closeDrawer = useUIStore(s => s.closeDrawer);
-  const openDrawer = useUIStore(s => s.openDrawer);
   const openLocalGraph = useUIStore(s => s.openLocalGraph);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -375,8 +374,8 @@ export function AtomViewer({ atom, onClose, onEdit, highlightText }: AtomViewerP
   };
 
   const handleRelatedAtomClick = (atomId: string) => {
-    // Open the related atom in the viewer
-    openDrawer('viewer', atomId);
+    // Open the related atom in the reader
+    useUIStore.getState().openReader(atomId);
   };
 
   return (

@@ -18,7 +18,7 @@ function truncLabel(str: string, max: number): string {
 }
 
 export function SigmaCanvas() {
-  const openDrawer = useUIStore(s => s.openDrawer);
+  const openReader = useUIStore(s => s.openReader);
   const selectedTagId = useUIStore(s => s.selectedTagId);
   const activeDbId = useDatabasesStore(s => s.activeId);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -345,7 +345,7 @@ export function SigmaCanvas() {
     const cancelAnim = () => { cancelledAnim = true; };
 
     sigma.on('clickNode', ({ node }) => {
-      openDrawer('viewer', node);
+      openReader(node);
     });
 
     return () => {
@@ -355,7 +355,7 @@ export function SigmaCanvas() {
       sigmaRef.current = null;
       graphRef.current = null;
     };
-  }, [data, openDrawer]); // intentionally exclude theme — handled below
+  }, [data, openReader]); // intentionally exclude theme — handled below
 
   // Update colors when theme changes (without recreating graph)
   useEffect(() => {
