@@ -143,11 +143,16 @@ fn parse_tag_extractions(json: &str, raw_content: &str) -> Result<Vec<TagApplica
     if let Ok(tags) = serde_json::from_str::<Vec<TagApplication>>(json) {
         return Ok(tags);
     }
-    let err = serde_json::from_str::<serde_json::Value>(json).unwrap_err();
-    Err(format!(
-        "Failed to parse extraction result: {} - Content: {}",
-        err, raw_content
-    ))
+    match serde_json::from_str::<serde_json::Value>(json) {
+        Ok(val) => Err(format!(
+            "Unexpected JSON shape for tag extraction: {} - Content: {}",
+            val, raw_content
+        )),
+        Err(err) => Err(format!(
+            "Failed to parse extraction result: {} - Content: {}",
+            err, raw_content
+        )),
+    }
 }
 
 /// Strip markdown code fences from LLM output before parsing as JSON.
