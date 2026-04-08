@@ -2,6 +2,7 @@ import { useMemo, useCallback, useEffect, useRef, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { AtomGrid } from '../atoms/AtomGrid';
 import { AtomList } from '../atoms/AtomList';
+import { AtomReader } from '../atoms/AtomReader';
 import { FilterBar } from '../atoms/FilterBar';
 import { SigmaCanvas } from '../canvas/SigmaCanvas';
 import { FAB } from '../ui/FAB';
@@ -42,6 +43,8 @@ export function MainView() {
   const toggleWikiSidebar = useUIStore(s => s.toggleWikiSidebar);
   const setViewMode = useUIStore(s => s.setViewMode);
   const openDrawer = useUIStore(s => s.openDrawer);
+  const openReader = useUIStore(s => s.openReader);
+  const readerState = useUIStore(s => s.readerState);
   const openChatDrawer = useUIStore(s => s.openChatDrawer);
 
   const openCommandPalette = useUIStore(s => s.openCommandPalette);
@@ -108,7 +111,7 @@ export function MainView() {
     // - Hybrid: highlight the search query (prioritize keywords over chunk)
     const isSearch = useAtomsStore.getState().semanticSearchResults !== null;
     if (!isSearch) {
-      openDrawer('viewer', atomId);
+      openReader(atomId);
       return;
     }
     const mode = useAtomsStore.getState().searchMode;
@@ -119,8 +122,8 @@ export function MainView() {
     } else {
       highlightText = matchingChunkMap?.get(atomId);
     }
-    openDrawer('viewer', atomId, highlightText);
-  }, [openDrawer, matchingChunkMap]);
+    openReader(atomId, highlightText);
+  }, [openReader, matchingChunkMap]);
 
   const handleNewAtom = useCallback(() => {
     openDrawer('editor');
@@ -164,7 +167,7 @@ export function MainView() {
   return (
     <>
     <main className="relative flex-1 flex flex-col h-full bg-[var(--color-bg-main)] overflow-hidden">
-      {/* Titlebar row - aligned with traffic lights */}
+      {/* Titlebar row */}
       <div className={`h-[52px] flex items-center gap-3 px-4 flex-shrink-0 ${!leftPanelOpen && isTauri() ? 'pl-[78px]' : ''}`}>
         {/* Left sidebar toggle */}
         <button
@@ -339,7 +342,7 @@ export function MainView() {
       {!isSemanticSearch && viewMode !== 'canvas' && viewMode !== 'wiki' && filterBarOpen && <FilterBar />}
 
       {/* Content */}
-      <div className="flex-1 overflow-hidden">
+      <div className="flex-1 overflow-hidden relative">
         {viewMode === 'wiki' ? (
           <WikiFullView />
         ) : viewMode === 'canvas' ? (
@@ -369,8 +372,15 @@ export function MainView() {
         )}
       </div>
 
-      {/* FAB — hide in wiki mode */}
-      {viewMode !== 'wiki' && <FAB onClick={handleNewAtom} title="Create new atom" />}
+      {/* Reader overlay — fades in over entire screen */}
+      {readerState.atomId && (
+        <div className="fixed inset-0 z-30">
+          <AtomReader atomId={readerState.atomId} highlightText={readerState.highlightText} />
+        </div>
+      )}
+
+      {/* FAB — hide in wiki mode and reader */}
+      {viewMode !== 'wiki' && !readerState.atomId && <FAB onClick={handleNewAtom} title="Create new atom" />}
 
       {/* Embedding progress overlay */}
       <EmbeddingProgressBanner />

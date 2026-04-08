@@ -83,6 +83,29 @@
   --font-family-mono: var(--font-mono);
 }
 
+[data-reader-theme="light"] {
+  --color-bg-main: #fafafa;
+  --color-bg-panel: #ffffff;
+  --color-bg-card: #f0f0f0;
+  --color-bg-elevated: #f0f0f0;
+  --color-bg-hover: #e8e8e8;
+
+  --color-text-primary: #1a1a1a;
+  --color-text-secondary: #666666;
+  --color-text-tertiary: #999999;
+
+  --color-border: #e0e0e0;
+  --color-border-hover: #d0d0d0;
+
+  --color-accent: #7c3aed;
+  --color-accent-hover: #6d28d9;
+  --color-accent-light: #7c3aed;
+
+  --scrollbar-track: #fafafa;
+  --scrollbar-thumb: #d0d0d0;
+  --scrollbar-thumb-hover: #b0b0b0;
+}
+
 [data-font="satoshi"] { --font-sans: 'Satoshi', -apple-system, BlinkMacSystemFont, sans-serif; }
 [data-font="ibm-plex-sans"] { --font-sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif; }
 [data-font="source-sans"] { --font-sans: 'Source Sans 3', -apple-system, BlinkMacSystemFont, sans-serif; }

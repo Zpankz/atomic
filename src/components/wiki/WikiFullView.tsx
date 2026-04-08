@@ -48,7 +48,7 @@ export function WikiFullView() {
 
   const reset = useWikiStore(s => s.reset);
 
-  const openDrawer = useUIStore(s => s.openDrawer);
+  const openReader = useUIStore(s => s.openReader);
 
   const [showRegenerateModal, setShowRegenerateModal] = useState(false);
   const [showVersions, setShowVersions] = useState(false);
@@ -91,7 +91,7 @@ export function WikiFullView() {
   };
 
   const handleViewAtom = (atomId: string) => {
-    openDrawer('viewer', atomId);
+    openReader(atomId);
   };
 
   const renderArticleContent = () => {

@@ -9,11 +9,11 @@ function App() {
   // Initialize embedding event listener
   useEmbeddingEvents();
 
-  const openDrawer = useUIStore(s => s.openDrawer);
+  const overlayNavigate = useUIStore(s => s.overlayNavigate);
 
   const handleAtomClick = useCallback((atomId: string) => {
-    openDrawer('viewer', atomId);
-  }, [openDrawer]);
+    overlayNavigate({ type: 'reader', atomId });
+  }, [overlayNavigate]);
 
   return (
     <>

@@ -45,7 +45,7 @@ export function WikiListViewer() {
   const clearSelectedVersion = useWikiStore(s => s.clearSelectedVersion);
 
   const closeDrawer = useUIStore(s => s.closeDrawer);
-  const openDrawer = useUIStore(s => s.openDrawer);
+  const openReader = useUIStore(s => s.openReader);
   const initializedRef = useRef(false);
 
   // Initialize by fetching articles list
@@ -107,7 +107,7 @@ export function WikiListViewer() {
   };
 
   const handleViewAtom = (atomId: string) => {
-    openDrawer('viewer', atomId);
+    openReader(atomId);
   };
 
   // List view
