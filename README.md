@@ -14,7 +14,7 @@ Atomic stores knowledge as **atoms** — markdown notes that are automatically c
 
 *Spatial canvas — related atoms cluster together*
 
-https://github.com/user-attachments/assets/e466c26a-48f6-4eb5-b276-4145b052b390
+https://github.com/user-attachments/assets/e8cd771f-6e23-46cf-86d1-3c70cb8d1954
 
 *Atoms — markdown notes with tags, sources, and neighborhood graph*
 
@@ -24,9 +24,9 @@ https://github.com/user-attachments/assets/e466c26a-48f6-4eb5-b276-4145b052b390
 
 ![Wiki Synthesis](./docs/images/wiki.png)
 
-*Chat — agentic RAG scoped to your knowledge base*
+*Canvas — view your knowledge on an interactive graph*
 
-![Chat Interface](./docs/images/chat.png)
+![Canvas](./docs/images/canvas.png)
 
 *Semantic search — find by meaning, not keywords*
 
