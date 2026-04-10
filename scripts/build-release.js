@@ -83,6 +83,30 @@ function exec(cmd) {
   execSync(cmd, { cwd: PROJECT_ROOT, stdio: 'inherit' });
 }
 
+function execCapture(cmd) {
+  return execSync(cmd, { cwd: PROJECT_ROOT, encoding: 'utf8' }).trim();
+}
+
+function preflight() {
+  log('Running preflight checks...');
+
+  // Must be on main branch
+  const branch = execCapture('git rev-parse --abbrev-ref HEAD');
+  if (branch !== 'main') {
+    error(`Must be on 'main' branch to release (currently on '${branch}')`);
+  }
+
+  // Working tree must be clean
+  const status = execCapture('git status --porcelain');
+  if (status) {
+    error(`Working tree is not clean. Commit or stash changes first:\n${status}`);
+  }
+
+  // Pull latest from origin/main (fast-forward only — fails on divergence)
+  log('Pulling latest from origin/main...');
+  exec('git pull --ff-only origin main');
+}
+
 function showHelp() {
   console.log(`
 Usage: node scripts/build-release.js <bump-type>
@@ -113,6 +137,8 @@ function main() {
     error(`Invalid bump type: ${bumpType}. Use patch, minor, or major.`);
   }
 
+  preflight();
+
   // Get current version and bump it
   const currentVersion = getCurrentVersion();
   const newVersion = bumpVersion(currentVersion, bumpType);
@@ -123,9 +149,15 @@ function main() {
   // Update version in all files
   updateVersion(newVersion);
 
+  // Sync lockfiles so the bumped versions land in Cargo.lock and package-lock.json.
+  // Without this, the next local build rewrites them and leaves stale state in git.
+  log('\nSyncing lockfiles...');
+  exec('cargo update --workspace --offline');
+  exec('npm install --package-lock-only --silent');
+
   // Commit, tag, and push
   log('\nCommitting version bump...');
-  exec('git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml');
+  exec('git add package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml Cargo.lock');
   exec(`git commit -m "Bump version to ${tagName}"`);
 
   log(`\nCreating tag ${tagName}...`);

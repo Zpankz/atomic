@@ -1,5 +1,5 @@
 # --- Build stage ---
-FROM node:22-slim AS build
+FROM node:24-slim AS build
 
 WORKDIR /app
 COPY package.json package-lock.json* ./
@@ -17,7 +17,7 @@ COPY packages/web/ packages/web/
 RUN npm run build -w packages/web
 
 # --- API ---
-FROM node:22-slim AS api
+FROM node:24-slim AS api
 
 WORKDIR /app
 COPY --from=build /app/package.json /app/package-lock.json* ./
