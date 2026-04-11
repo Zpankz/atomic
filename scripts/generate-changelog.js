@@ -48,8 +48,48 @@ function collectCommitHistory(previousTag) {
   return { range, log, stat };
 }
 
+// Read-only tools the changelog agent is allowed to use. The agent inherits
+// the project's CLAUDE.md via settingSources, and uses these to inspect the
+// actual diffs, read source, and grep the repo — not just the commit subjects.
+const CHANGELOG_TOOLS = ['Bash', 'Read', 'Grep', 'Glob'];
+
+// Hard timeout so a runaway release script can't hang the build forever.
+const AGENT_TIMEOUT_MS = 10 * 60 * 1000;
+
+function logAgentProgress(message) {
+  if (message.type === 'assistant' && message.message?.content) {
+    for (const block of message.message.content) {
+      if (block.type === 'text' && block.text) {
+        // Keep it compact — just the first line of any assistant narration.
+        const firstLine = block.text.split('\n').find((l) => l.trim());
+        if (firstLine) process.stdout.write(`  · ${firstLine.trim()}\n`);
+      } else if (block.type === 'tool_use') {
+        const name = block.name;
+        const input = block.input ?? {};
+        let detail = '';
+        if (name === 'Bash' && input.command) {
+          detail = String(input.command).split('\n')[0].slice(0, 120);
+        } else if ((name === 'Read' || name === 'Glob') && input.file_path) {
+          detail = String(input.file_path);
+        } else if (name === 'Glob' && input.pattern) {
+          detail = String(input.pattern);
+        } else if (name === 'Grep' && input.pattern) {
+          detail = String(input.pattern);
+        }
+        process.stdout.write(`  → ${name}${detail ? `: ${detail}` : ''}\n`);
+      }
+    }
+  }
+}
+
 /**
  * Generate the markdown body (bullets only — no heading) for a release entry.
+ *
+ * The agent has read-only access to the repo via Bash/Read/Grep/Glob so it
+ * can inspect actual diffs (`git show <hash>`, `git log -p`, reading source)
+ * rather than relying on commit subjects alone. Because this runs from an
+ * unattended build script, permissions are bypassed — the tool allowlist is
+ * the real safety boundary, not interactive prompts.
  *
  * @param {string | null} previousTag
  * @param {string} newVersion
@@ -66,56 +106,84 @@ export async function generateChangelogBody(previousTag, newVersion) {
   // Dynamic import so the SDK only loads when actually cutting a release.
   const { query } = await import('@anthropic-ai/claude-agent-sdk');
 
+  const range = previousTag ? `${previousTag}..HEAD` : 'HEAD';
+
   const prompt = `You are writing the CHANGELOG entry for Atomic v${newVersion}.
 
 Atomic is a personal knowledge base desktop app (Tauri + React + Rust + SQLite)
 with a headless server and an iOS client. Readers of this changelog are users
 of the app, not contributors — focus on what they will notice.
 
-Below is every commit since the previous release${previousTag ? ` (${previousTag})` : ''}.
-Each commit starts with a line that begins with "--- <hash> <subject>" followed
-by its body.
+The range for this release is \`${range}\`${previousTag ? ` (previous tag: ${previousTag})` : ''}.
 
-=== GIT LOG ===
+Here's a quick seed to orient you — the commit subjects and file-change summary:
+
+=== GIT LOG (subjects + bodies) ===
 ${log}
 
 === FILE DIFF SUMMARY ===
 ${stat || '(no diff stat available)'}
 
-Write 3 to 6 markdown bullet points summarising this release. Rules:
-- Output bullets only. No heading, no preamble, no trailing commentary, no code fences.
+You have read-only access to the repo. **Don't stop at the commit subjects — dig in.**
+Use your tools to understand what actually changed:
+
+- \`git show <hash>\` or \`git log -p ${range} -- <path>\` to see real diffs for
+  anything whose user impact isn't clear from the subject alone.
+- \`Read\` / \`Grep\` / \`Glob\` to inspect source around interesting changes
+  (e.g. a new config option, a reworked UI component, a changed default).
+- Look at CLAUDE.md if you need context on the architecture.
+- You can run any read-only Bash command. Don't modify anything on disk.
+
+Your goal is a concise, accurate, user-facing changelog — even when that
+requires more context than what the commit messages say.
+
+When you're done, respond with the final CHANGELOG entry:
+- 3 to 6 markdown bullet points, bullets only. No heading, no preamble, no
+  trailing commentary, no code fences.
 - Each bullet is one line, present tense, user-facing ("Add…", "Fix…", "Improve…").
 - Group related commits into a single bullet where it makes sense.
 - Omit purely internal refactors, dependency bumps, and CI changes unless they
   have a visible effect.
-- Do not invent features that aren't in the git log.
-- Do not use any tools — everything you need is in this prompt.`;
+- Don't invent features that aren't actually in the diff.`;
+
+  const abortController = new AbortController();
+  const timeout = setTimeout(() => abortController.abort(), AGENT_TIMEOUT_MS);
 
   let resultText = '';
   let errorSubtype = null;
+  let errors = [];
 
-  for await (const message of query({
-    prompt,
-    options: {
-      cwd: PROJECT_ROOT,
-      settingSources: ['project'],
-      // Disable all built-in tools so the run is deterministic and never blocks
-      // on a permission prompt. The model has everything it needs in the prompt.
-      tools: [],
-      allowedTools: [],
-    },
-  })) {
-    if (message.type === 'result') {
-      if (message.subtype === 'success') {
-        resultText = message.result.trim();
-      } else {
-        errorSubtype = message.subtype;
+  try {
+    for await (const message of query({
+      prompt,
+      options: {
+        cwd: PROJECT_ROOT,
+        settingSources: ['project'],
+        tools: CHANGELOG_TOOLS,
+        allowedTools: CHANGELOG_TOOLS,
+        // Unattended build script — auto-approve tool calls. The tool allowlist
+        // above (read-only exploration) is the real safety boundary.
+        permissionMode: 'bypassPermissions',
+        abortController,
+      },
+    })) {
+      logAgentProgress(message);
+      if (message.type === 'result') {
+        if (message.subtype === 'success') {
+          resultText = message.result.trim();
+        } else {
+          errorSubtype = message.subtype;
+          errors = message.errors ?? [];
+        }
       }
     }
+  } finally {
+    clearTimeout(timeout);
   }
 
   if (errorSubtype) {
-    throw new Error(`Claude Agent SDK returned error subtype: ${errorSubtype}`);
+    const detail = errors.length ? `\n${errors.join('\n')}` : '';
+    throw new Error(`Claude Agent SDK returned error subtype: ${errorSubtype}${detail}`);
   }
   if (!resultText) {
     throw new Error('Claude Agent SDK returned no result message.');
