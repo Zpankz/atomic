@@ -6,6 +6,7 @@ pub mod models;
 pub mod ollama;
 pub mod openai_compat;
 pub mod openrouter;
+pub mod structured;
 pub mod traits;
 pub mod types;
 
@@ -17,6 +18,7 @@ pub use models::{fetch_and_return_capabilities, get_cached_capabilities_sync, sa
 pub use ollama::OllamaProvider;
 pub use openai_compat::OpenAICompatProvider;
 pub use openrouter::OpenRouterProvider;
+pub use structured::{call_structured, lint_schema, parse_tolerant, StructuredCall, StructuredCallError};
 pub use traits::{EmbeddingConfig, EmbeddingProvider, LlmConfig, LlmProvider, StreamingLlmProvider};
 
 /// Provider type enum

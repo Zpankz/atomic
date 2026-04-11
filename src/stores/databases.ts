@@ -5,6 +5,7 @@ import { useAtomsStore } from './atoms';
 import { useTagsStore } from './tags';
 import { useWikiStore } from './wiki';
 import { useChatStore } from './chat';
+import { useBriefingStore } from './briefing';
 
 export interface DatabaseInfo {
   id: string;
@@ -94,8 +95,10 @@ export const useDatabasesStore = create<DatabasesStore>((set, get) => ({
         useTagsStore.getState().reset();
         useWikiStore.getState().reset();
         useChatStore.getState().reset();
+        useBriefingStore.getState().reset();
         useTagsStore.getState().fetchTags();
         useAtomsStore.getState().fetchAtoms();
+        useBriefingStore.getState().fetchLatest();
       }
     } catch (e) {
       toast.error('Failed to delete database', { description: String(e) });
@@ -135,10 +138,12 @@ export const useDatabasesStore = create<DatabasesStore>((set, get) => ({
       useTagsStore.getState().reset();
       useWikiStore.getState().reset();
       useChatStore.getState().reset();
+      useBriefingStore.getState().reset();
 
       // Refetch data for the new database
       useTagsStore.getState().fetchTags();
       useAtomsStore.getState().fetchAtoms();
+      useBriefingStore.getState().fetchLatest();
     } catch (e) {
       toast.error('Failed to switch database', { description: String(e) });
       throw e;
