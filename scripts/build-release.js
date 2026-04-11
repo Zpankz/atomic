@@ -2,6 +2,7 @@
 import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import readline from 'readline';
 import { fileURLToPath } from 'url';
 import {
   getPreviousTag,
@@ -92,6 +93,53 @@ function execCapture(cmd) {
   return execSync(cmd, { cwd: PROJECT_ROOT, encoding: 'utf8' }).trim();
 }
 
+function askConfirmation(question) {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.trim().toLowerCase());
+    });
+  });
+}
+
+// Files this script touches before the release commit. If the user aborts at
+// the confirmation prompt, we roll these back so the working tree is clean
+// and the next `npm run release:*` invocation can run fresh.
+const RELEASE_FILES = [
+  'package.json',
+  'package-lock.json',
+  'src-tauri/tauri.conf.json',
+  'src-tauri/Cargo.toml',
+  'Cargo.lock',
+];
+
+function revertReleaseChanges(changelogExisted) {
+  log('\nReverting uncommitted release changes...');
+  try {
+    exec(`git checkout -- ${RELEASE_FILES.join(' ')}`);
+  } catch (err) {
+    console.error(`  (failed to restore release files: ${err?.message || err})`);
+  }
+  const changelogPath = path.join(PROJECT_ROOT, 'CHANGELOG.md');
+  if (changelogExisted) {
+    try {
+      exec('git checkout -- CHANGELOG.md');
+    } catch (err) {
+      console.error(`  (failed to restore CHANGELOG.md: ${err?.message || err})`);
+    }
+  } else if (fs.existsSync(changelogPath)) {
+    try {
+      fs.unlinkSync(changelogPath);
+    } catch (err) {
+      console.error(`  (failed to delete CHANGELOG.md: ${err?.message || err})`);
+    }
+  }
+}
+
 function preflight() {
   log('Running preflight checks...');
 
@@ -167,11 +215,33 @@ async function main() {
   // Generate the AI changelog entry before committing so CHANGELOG.md lands in
   // the same commit as the version bump. If the SDK call fails we abort here,
   // before anything is committed or pushed.
+  const changelogPath = path.join(PROJECT_ROOT, 'CHANGELOG.md');
+  const changelogExisted = fs.existsSync(changelogPath);
+
   log(`\nGenerating changelog entry${previousTag ? ` since ${previousTag}` : ''} via Claude Agent SDK...`);
   const changelogBody = await generateChangelogBody(previousTag, newVersion);
   log(`\n--- Changelog entry ---\n${changelogBody}\n-----------------------\n`);
   prependChangelog(newVersion, changelogBody);
-  log('Updated CHANGELOG.md');
+  log(`Updated ${path.relative(PROJECT_ROOT, changelogPath)}`);
+
+  // Wait for explicit confirmation before cutting the release. The user can
+  // open CHANGELOG.md in their editor, tweak the entry, save, then confirm —
+  // whatever's on disk at confirmation time is what gets committed.
+  const sigintHandler = () => {
+    revertReleaseChanges(changelogExisted);
+    process.exit(130);
+  };
+  process.on('SIGINT', sigintHandler);
+
+  log('\nReview CHANGELOG.md above (or open it in your editor to tweak).');
+  const answer = await askConfirmation(`Proceed with release ${tagName}? [Y/n] `);
+  process.off('SIGINT', sigintHandler);
+
+  if (answer === 'n' || answer === 'no') {
+    revertReleaseChanges(changelogExisted);
+    log('\nAborted by user. No commit, tag, or push.');
+    process.exit(0);
+  }
 
   // Commit, tag, and push
   log('\nCommitting version bump...');
