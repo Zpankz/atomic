@@ -15,9 +15,9 @@ use crate::models::{
     WikiArticleStatus, WikiArticleVersion, WikiArticleWithCitations, WikiCitation,
     WikiLink, WikiVersionSummary,
 };
-use crate::providers::traits::LlmConfig;
-use crate::providers::types::{GenerationParams, Message, StructuredOutputSchema};
-use crate::providers::{get_llm_provider, ProviderConfig};
+use crate::providers::structured::{call_structured, StructuredCall};
+use crate::providers::types::Message;
+use crate::providers::ProviderConfig;
 use crate::storage::StorageBackend;
 
 use chrono::Utc;
@@ -222,7 +222,7 @@ pub(crate) struct WikiUpdateOpsResult {
 ///
 /// The LLM emits the flat shape; `WikiSectionOpWire::into_op()` validates
 /// and converts to the strict `WikiSectionOp` enum.
-fn section_ops_schema() -> serde_json::Value {
+pub(crate) fn section_ops_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
@@ -568,15 +568,10 @@ pub(crate) struct WikiGenerationResult {
     pub citations_used: Vec<i32>,
 }
 
-/// Call LLM provider for wiki generation (full-article rewrite schema).
-/// Thin wrapper over `call_llm_for_wiki_typed`.
-pub(crate) async fn call_llm_for_wiki(
-    provider_config: &ProviderConfig,
-    system_prompt: &str,
-    user_content: &str,
-    model: &str,
-) -> Result<WikiGenerationResult, String> {
-    let schema = serde_json::json!({
+/// JSON schema for wiki full-article generation. Extracted as a function so
+/// it's callable from the lint regression tests.
+pub(crate) fn wiki_generation_schema() -> serde_json::Value {
+    serde_json::json!({
         "type": "object",
         "properties": {
             "article_content": {
@@ -591,107 +586,71 @@ pub(crate) async fn call_llm_for_wiki(
         },
         "required": ["article_content", "citations_used"],
         "additionalProperties": false
-    });
+    })
+}
 
+/// Call LLM provider for wiki generation (full-article rewrite schema).
+/// Thin wrapper over [`call_llm_for_wiki_typed`].
+pub(crate) async fn call_llm_for_wiki(
+    provider_config: &ProviderConfig,
+    system_prompt: &str,
+    user_content: &str,
+    model: &str,
+) -> Result<WikiGenerationResult, String> {
     call_llm_for_wiki_typed::<WikiGenerationResult>(
         provider_config,
         system_prompt,
         user_content,
         model,
         "wiki_generation_result",
-        schema,
+        wiki_generation_schema(),
     )
     .await
 }
 
-/// Generic LLM call for wiki operations. Callers provide the JSON schema and
-/// the result type; retry/parse/error handling is shared.
+/// Generic LLM call for wiki operations. Thin wrapper over the shared
+/// [`call_structured`] helper that adds wiki-specific tracing context so
+/// the logs still say `[wiki]` for anyone watching them. The retry / parse
+/// / prompt-based-fallback loop lives in the shared helper now.
 pub(crate) async fn call_llm_for_wiki_typed<T: DeserializeOwned>(
     provider_config: &ProviderConfig,
     system_prompt: &str,
     user_content: &str,
     model: &str,
-    schema_name: &str,
+    schema_name: &'static str,
     schema: serde_json::Value,
 ) -> Result<T, String> {
-    let input_chars = user_content.len();
-    tracing::info!(model, input_chars, schema = %schema_name, "[wiki] Starting generation");
+    tracing::info!(
+        model,
+        input_chars = user_content.len(),
+        schema = %schema_name,
+        "[wiki] Starting generation"
+    );
 
     let messages = vec![Message::system(system_prompt), Message::user(user_content)];
 
-    let llm_config = LlmConfig::new(model).with_params(
-        GenerationParams::new()
-            .with_temperature(0.3)
-            .with_structured_output(StructuredOutputSchema::new(schema_name, schema)),
+    let call = StructuredCall::<T>::new(
+        provider_config,
+        model,
+        &messages,
+        schema_name,
+        schema,
     );
 
-    let provider = get_llm_provider(provider_config).map_err(|e| e.to_string())?;
-
-    // Only retry on transient errors (rate limits, network). Never retry on
-    // content/parse errors — those waste tokens on calls doomed to fail the same way.
-    let max_retries = 2;
-    let mut last_error = String::new();
-    for attempt in 0..=max_retries {
-        if attempt > 0 {
-            let delay = 1u64 << attempt;
-            tracing::warn!(attempt, max_retries, delay_secs = delay, last_error = %last_error, "[wiki] Retrying");
-            tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+    let started = std::time::Instant::now();
+    match call_structured::<T>(call).await {
+        Ok(result) => {
+            tracing::info!(
+                elapsed_secs = format_args!("{:.1}", started.elapsed().as_secs_f64()),
+                "[wiki] Structured generation complete"
+            );
+            Ok(result)
         }
-
-        let start = std::time::Instant::now();
-        match provider.complete(&messages, &llm_config).await {
-            Ok(response) => {
-                let elapsed = start.elapsed();
-                let content = &response.content;
-                tracing::info!(elapsed_secs = format_args!("{:.1}", elapsed.as_secs_f64()), output_chars = content.len(), "[wiki] LLM responded");
-
-                if content.is_empty() {
-                    tracing::error!("[wiki] LLM returned empty content");
-                    return Err("LLM returned empty content".to_string());
-                }
-
-                // Parse the structured JSON response
-                match serde_json::from_str::<T>(content) {
-                    Ok(result) => {
-                        return Ok(result);
-                    }
-                    Err(parse_err) => {
-                        // Log the parse failure with enough context to debug, but don't retry —
-                        // the same prompt will produce the same unparseable output.
-                        let preview = {
-                            let mut iter = content.chars();
-                            let head: String = iter.by_ref().take(500).collect();
-                            if iter.next().is_some() {
-                                format!("{}...[truncated]", head)
-                            } else {
-                                head
-                            }
-                        };
-                        tracing::error!(error = %parse_err, preview = %preview, "[wiki] Failed to parse LLM response as JSON");
-                        return Err(format!("Failed to parse wiki result: {}", parse_err));
-                    }
-                }
-            }
-            Err(e) => {
-                let elapsed = start.elapsed();
-                tracing::error!(elapsed_secs = format_args!("{:.1}", elapsed.as_secs_f64()), error = %e, "[wiki] LLM call failed");
-
-                if e.is_retryable() && attempt < max_retries {
-                    last_error = e.to_string();
-                    continue;
-                } else {
-                    if !e.is_retryable() {
-                        tracing::error!("[wiki] Non-retryable error, giving up immediately");
-                    } else {
-                        tracing::error!("[wiki] Max retries exhausted");
-                    }
-                    return Err(e.to_string());
-                }
-            }
+        Err(e) => {
+            tracing::error!(error = %e, "[wiki] Structured generation failed");
+            Err(e.to_compact_string())
         }
     }
-
-    Err(last_error)
 }
 
 // ==================== Shared Utilities ====================
@@ -1667,12 +1626,32 @@ pub fn get_suggested_wiki_articles(
 mod tests {
     use super::*;
     use crate::db::Database as CoreDatabase;
+    use crate::providers::structured::lint_schema;
     use tempfile::NamedTempFile;
 
     fn create_test_db() -> (CoreDatabase, NamedTempFile) {
         let temp_file = NamedTempFile::new().unwrap();
         let db = CoreDatabase::open_or_create(temp_file.path()).unwrap();
         (db, temp_file)
+    }
+
+    // ==================== Schema lint regression tests ====================
+    //
+    // These guard against someone editing a schema in a way that would cause
+    // silent cross-provider divergence (wiki has been bitten by this before —
+    // see the long comment on `section_ops_schema`). The linter lives in
+    // `providers::structured::lint_schema`.
+
+    #[test]
+    fn lint_wiki_generation_schema() {
+        lint_schema(&wiki_generation_schema())
+            .expect("wiki_generation_schema must be portable across providers");
+    }
+
+    #[test]
+    fn lint_wiki_section_ops_schema() {
+        lint_schema(&section_ops_schema())
+            .expect("section_ops_schema must be portable across providers");
     }
 
     fn insert_tag(conn: &Connection, id: &str, name: &str) {

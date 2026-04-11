@@ -8,10 +8,8 @@
 //! via `semantic_search` are for context only and cannot be cited.
 
 use crate::models::AtomWithTags;
-use crate::providers::types::{
-    CompletionResponse, GenerationParams, Message, MessageRole, StructuredOutputSchema,
-    ToolDefinition,
-};
+use crate::providers::structured::{call_structured, StructuredCall};
+use crate::providers::types::{CompletionResponse, Message, MessageRole, ToolDefinition};
 use crate::providers::{get_llm_provider, LlmConfig, ProviderConfig, ProviderType};
 use crate::search::{SearchMode, SearchOptions};
 use crate::AtomicCore;
@@ -36,15 +34,6 @@ const MAX_SEARCH_LIMIT: i64 = 10;
 const DEFAULT_READ_LIMIT: i64 = 500;
 const MAX_READ_LIMIT: i64 = 500;
 
-/// Temperature for the final structured-output pass. Matches wiki synthesis —
-/// low enough to be deterministic, high enough to preserve prose voice.
-const FINAL_PASS_TEMPERATURE: f32 = 0.3;
-
-/// Retries on transient errors for the final structured-output pass. Matches
-/// wiki synthesis: only retries rate-limit / network failures, never parse
-/// errors (the same prompt will produce the same unparseable output).
-const FINAL_PASS_MAX_RETRIES: usize = 2;
-
 /// Structured-output envelope for the final briefing pass. Mirrors
 /// `WikiGenerationResult` in the wiki module so both synthesis paths use the
 /// same "prose + citation list" shape.
@@ -56,7 +45,7 @@ struct BriefingGenerationResult {
     citations_used: Vec<i32>,
 }
 
-fn briefing_schema() -> serde_json::Value {
+pub(crate) fn briefing_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
@@ -429,76 +418,29 @@ async fn run_research(
     Ok(())
 }
 
-/// Final pass: call the LLM with the accumulated research conversation, no
-/// tools, and a structured-output schema so the response is guaranteed-parsable
-/// JSON with a `briefing_content` field. Retries transient errors with
-/// exponential backoff, mirroring `call_llm_for_wiki_typed`.
+/// Final pass: hand the accumulated research conversation to the shared
+/// `call_structured` helper. Everything about retries, tolerant parsing, and
+/// the prompt-based fallback lives there — this function is now just glue.
 async fn final_briefing_call(
     provider_config: &ProviderConfig,
     model: &str,
     messages: &[Message],
 ) -> Result<String, String> {
-    let provider = get_llm_provider(provider_config).map_err(|e| e.to_string())?;
-
-    let llm_config = LlmConfig::new(model).with_params(
-        GenerationParams::new()
-            .with_temperature(FINAL_PASS_TEMPERATURE)
-            .with_structured_output(StructuredOutputSchema::new(
-                "briefing_generation_result",
-                briefing_schema(),
-            )),
+    let call = StructuredCall::<BriefingGenerationResult>::new(
+        provider_config,
+        model,
+        messages,
+        "briefing_generation_result",
+        briefing_schema(),
     );
 
-    let mut last_error = String::new();
-    for attempt in 0..=FINAL_PASS_MAX_RETRIES {
-        if attempt > 0 {
-            let delay = 1u64 << attempt;
-            tracing::warn!(
-                attempt,
-                max_retries = FINAL_PASS_MAX_RETRIES,
-                delay_secs = delay,
-                last_error = %last_error,
-                "[briefing] Retrying final pass"
-            );
-            tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-        }
-
-        match provider.complete(messages, &llm_config).await {
-            Ok(response) => {
-                if response.content.is_empty() {
-                    return Err("Briefing LLM returned empty content".to_string());
-                }
-                match serde_json::from_str::<BriefingGenerationResult>(&response.content) {
-                    Ok(result) => return Ok(result.briefing_content),
-                    Err(parse_err) => {
-                        // Don't retry on parse errors — the same prompt would produce
-                        // the same unparseable output. Log a preview for debugging.
-                        let preview: String = response.content.chars().take(500).collect();
-                        tracing::error!(
-                            error = %parse_err,
-                            preview = %preview,
-                            "[briefing] Failed to parse structured briefing output"
-                        );
-                        return Err(format!("Failed to parse briefing result: {}", parse_err));
-                    }
-                }
-            }
-            Err(e) => {
-                last_error = e.to_string();
-                if e.is_retryable() && attempt < FINAL_PASS_MAX_RETRIES {
-                    continue;
-                }
-                if !e.is_retryable() {
-                    tracing::error!("[briefing] Non-retryable error on final pass");
-                } else {
-                    tracing::error!("[briefing] Max retries exhausted on final pass");
-                }
-                return Err(format!("Briefing final LLM call failed: {}", e));
-            }
+    match call_structured::<BriefingGenerationResult>(call).await {
+        Ok(result) => Ok(result.briefing_content),
+        Err(e) => {
+            tracing::error!(error = %e, "[briefing] Final structured pass failed");
+            Err(e.to_compact_string())
         }
     }
-
-    Err(last_error)
 }
 
 // ==================== Citation extraction ====================
@@ -604,4 +546,111 @@ pub(crate) async fn generate(
     );
 
     Ok((content, citations))
+}
+
+// ==================== Tests ====================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::structured::lint_schema;
+
+    #[test]
+    fn lint_briefing_schema_is_portable() {
+        lint_schema(&briefing_schema())
+            .expect("briefing_schema must be portable across providers");
+    }
+
+    #[test]
+    fn truncate_on_char_boundary_ascii() {
+        assert_eq!(truncate_on_char_boundary("hello", 3), "hel...");
+    }
+
+    #[test]
+    fn truncate_on_char_boundary_under_limit() {
+        assert_eq!(truncate_on_char_boundary("hi", 10), "hi");
+    }
+
+    #[test]
+    fn truncate_on_char_boundary_multibyte() {
+        // "héllo" is 6 bytes (é is 2 bytes). Truncating at byte offset 3
+        // must not split the é codepoint — we should land at a safe boundary.
+        let out = truncate_on_char_boundary("héllo", 3);
+        assert!(out.ends_with("..."));
+        // The non-ellipsis prefix must be valid UTF-8 (implicit — it's a String),
+        // and it should contain either "h" or "hé" but never a broken é.
+        let without_ellipsis = out.trim_end_matches("...");
+        assert!(!without_ellipsis.is_empty());
+    }
+
+    #[test]
+    fn extract_citations_maps_to_initial_list() {
+        let atoms = vec![
+            mock_atom("a-1", "first", "body 1"),
+            mock_atom("a-2", "second", "body 2"),
+            mock_atom("a-3", "third", "body 3"),
+        ];
+        let content = "The first atom introduces X [1]. The third expands on it [3].";
+        let citations = extract_citations(content, &atoms);
+        assert_eq!(citations.len(), 2);
+        assert_eq!(citations[0].0, 1);
+        assert_eq!(citations[0].1, "a-1");
+        assert_eq!(citations[1].0, 3);
+        assert_eq!(citations[1].1, "a-3");
+    }
+
+    #[test]
+    fn extract_citations_dedupes_repeats() {
+        let atoms = vec![mock_atom("a-1", "only", "body")];
+        // Same atom cited twice should only appear once in the output.
+        let content = "See [1] and also [1].";
+        let citations = extract_citations(content, &atoms);
+        assert_eq!(citations.len(), 1);
+        assert_eq!(citations[0].0, 1);
+    }
+
+    #[test]
+    fn extract_citations_drops_out_of_range() {
+        // Agent hallucinated [5] when only 2 atoms exist — must be dropped
+        // without panicking.
+        let atoms = vec![
+            mock_atom("a-1", "first", "body 1"),
+            mock_atom("a-2", "second", "body 2"),
+        ];
+        let content = "Valid [1] and [2], bogus [5] and [99].";
+        let citations = extract_citations(content, &atoms);
+        assert_eq!(citations.len(), 2);
+        assert_eq!(citations[0].0, 1);
+        assert_eq!(citations[1].0, 2);
+    }
+
+    #[test]
+    fn extract_citations_handles_no_citations() {
+        let atoms = vec![mock_atom("a-1", "only", "body")];
+        let content = "A plain paragraph with no markers at all.";
+        let citations = extract_citations(content, &atoms);
+        assert!(citations.is_empty());
+    }
+
+    fn mock_atom(id: &str, title: &str, snippet: &str) -> AtomWithTags {
+        use crate::models::Atom;
+        AtomWithTags {
+            atom: Atom {
+                id: id.to_string(),
+                content: snippet.to_string(),
+                title: title.to_string(),
+                snippet: snippet.to_string(),
+                source_url: None,
+                source: None,
+                published_at: None,
+                created_at: "2026-04-11T00:00:00Z".to_string(),
+                updated_at: "2026-04-11T00:00:00Z".to_string(),
+                embedding_status: "complete".to_string(),
+                tagging_status: "complete".to_string(),
+                embedding_error: None,
+                tagging_error: None,
+            },
+            tags: vec![],
+        }
+    }
 }
