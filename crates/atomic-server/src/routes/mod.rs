@@ -101,6 +101,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.route("/briefings/latest", web::get().to(briefings::get_latest_briefing));
     cfg.route("/briefings", web::get().to(briefings::list_briefings));
     cfg.route("/briefings/run", web::post().to(briefings::run_briefing_now));
+    cfg.route("/briefings/{id}", web::get().to(briefings::get_briefing));
 
     // Settings
     cfg.route("/settings", web::get().to(settings::get_settings));

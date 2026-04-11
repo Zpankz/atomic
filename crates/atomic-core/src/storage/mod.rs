@@ -414,6 +414,8 @@ dispatch! {
         => sqlite: insert_briefing_sync, pg_trait: BriefingStore, pg_method: insert_briefing;
     fn get_latest_briefing_sync(&self) -> Result<Option<crate::briefing::BriefingWithCitations>, AtomicCoreError>
         => sqlite: get_latest_briefing_sync, pg_trait: BriefingStore, pg_method: get_latest_briefing;
+    fn get_briefing_sync(&self, id: &str) -> Result<Option<crate::briefing::BriefingWithCitations>, AtomicCoreError>
+        => sqlite: get_briefing_sync, pg_trait: BriefingStore, pg_method: get_briefing;
     fn list_briefings_sync(&self, limit: i32) -> Result<Vec<crate::briefing::Briefing>, AtomicCoreError>
         => sqlite: list_briefings_sync, pg_trait: BriefingStore, pg_method: list_briefings;
     fn delete_briefing_sync(&self, id: &str) -> Result<(), AtomicCoreError>

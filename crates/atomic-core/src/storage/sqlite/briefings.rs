@@ -317,6 +317,14 @@ impl BriefingStore for SqliteStorage {
             .map_err(|e| AtomicCoreError::Lock(e.to_string()))?
     }
 
+    async fn get_briefing(&self, id: &str) -> StorageResult<Option<BriefingWithCitations>> {
+        let storage = self.clone();
+        let id = id.to_string();
+        tokio::task::spawn_blocking(move || storage.get_briefing_sync(&id))
+            .await
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?
+    }
+
     async fn list_briefings(&self, limit: i32) -> StorageResult<Vec<Briefing>> {
         let storage = self.clone();
         tokio::task::spawn_blocking(move || storage.list_briefings_sync(limit))

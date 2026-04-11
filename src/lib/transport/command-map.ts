@@ -213,6 +213,10 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
       return `/api/briefings${params.toString() ? `?${params}` : ''}`;
     },
   },
+  get_briefing: {
+    method: 'GET',
+    path: (a) => `/api/briefings/${encodeURIComponent(a.id as string)}`,
+  },
   run_briefing_now: {
     method: 'POST',
     path: '/api/briefings/run',

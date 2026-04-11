@@ -43,6 +43,10 @@ impl BriefingStore for PostgresStorage {
         unsupported()
     }
 
+    async fn get_briefing(&self, _id: &str) -> StorageResult<Option<BriefingWithCitations>> {
+        unsupported()
+    }
+
     async fn list_briefings(&self, _limit: i32) -> StorageResult<Vec<Briefing>> {
         unsupported()
     }

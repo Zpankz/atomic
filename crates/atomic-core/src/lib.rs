@@ -1374,6 +1374,12 @@ impl AtomicCore {
         self.storage.get_latest_briefing_sync()
     }
 
+    /// Get a specific briefing by id, joined with citations. Returns `None`
+    /// if no briefing with that id exists.
+    pub fn get_briefing(&self, id: &str) -> Result<Option<briefing::BriefingWithCitations>, AtomicCoreError> {
+        self.storage.get_briefing_sync(id)
+    }
+
     /// List recent briefings (without citations) for a lightweight history view.
     pub fn list_briefings(&self, limit: i32) -> Result<Vec<briefing::Briefing>, AtomicCoreError> {
         self.storage.list_briefings_sync(limit)

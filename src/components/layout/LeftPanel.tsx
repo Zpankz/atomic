@@ -14,13 +14,18 @@ export function LeftPanel() {
   const setLeftPanelOpen = useUIStore(s => s.setLeftPanelOpen);
   const panelRef = useRef<HTMLDivElement>(null);
 
-  // Auto-collapse on small screens, auto-expand on large screens
+  // Auto-collapse on small screens, auto-expand on large screens.
+  // On mount we only force-close when we're below the breakpoint — force-opening
+  // on desktop mount would clobber store state set by other logic (e.g., the
+  // dashboard view auto-hides the sidebar). Resize events still toggle both ways.
   useEffect(() => {
     const mq = window.matchMedia(`(max-width: ${COLLAPSE_BREAKPOINT}px)`);
-    const handleChange = (e: MediaQueryListEvent | MediaQueryList) => {
+    if (mq.matches) {
+      setLeftPanelOpen(false);
+    }
+    const handleChange = (e: MediaQueryListEvent) => {
       setLeftPanelOpen(!e.matches);
     };
-    handleChange(mq);
     mq.addEventListener('change', handleChange);
     return () => mq.removeEventListener('change', handleChange);
   }, [setLeftPanelOpen]);

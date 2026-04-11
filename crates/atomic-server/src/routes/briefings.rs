@@ -51,6 +51,28 @@ pub async fn list_briefings(db: Db, query: web::Query<ListBriefingsQuery>) -> Ht
 }
 
 #[utoipa::path(
+    get,
+    path = "/api/briefings/{id}",
+    responses(
+        (status = 200, description = "Briefing with citations", body = atomic_core::BriefingWithCitations),
+        (status = 404, description = "Briefing not found", body = ApiErrorResponse)
+    ),
+    tag = "briefings"
+)]
+pub async fn get_briefing(db: Db, path: web::Path<String>) -> HttpResponse {
+    let core = db.0;
+    let id = path.into_inner();
+    match web::block(move || core.get_briefing(&id)).await {
+        Ok(Ok(Some(b))) => HttpResponse::Ok().json(b),
+        Ok(Ok(None)) => HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "Briefing not found"})),
+        Ok(Err(e)) => error_response(e),
+        Err(e) => HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": format!("Thread pool error: {}", e)})),
+    }
+}
+
+#[utoipa::path(
     post,
     path = "/api/briefings/run",
     responses(

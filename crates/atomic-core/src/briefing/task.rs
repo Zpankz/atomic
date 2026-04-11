@@ -8,7 +8,6 @@
 use crate::scheduler::{state as task_state, ScheduledTask, TaskContext, TaskError, TaskEvent};
 use crate::AtomicCore;
 use async_trait::async_trait;
-use chrono::Utc;
 use std::time::Duration;
 
 /// The daily briefing task.
@@ -17,10 +16,6 @@ pub struct DailyBriefingTask;
 const TASK_ID: &str = "daily_briefing";
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const DEFAULT_ENABLED: bool = true;
-
-/// When the task has never run, seed `since` with this lookback so the
-/// first briefing has real material to summarize.
-const FIRST_RUN_LOOKBACK_DAYS: i64 = 7;
 
 #[async_trait]
 impl ScheduledTask for DailyBriefingTask {
@@ -54,25 +49,17 @@ impl ScheduledTask for DailyBriefingTask {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "default".to_string());
 
-        let since = task_state::get_last_run(core, TASK_ID)?
-            .unwrap_or_else(|| Utc::now() - chrono::Duration::days(FIRST_RUN_LOOKBACK_DAYS));
-
         (ctx.event_cb)(TaskEvent::Started {
             task_id: TASK_ID.to_string(),
             db_id: db_id.clone(),
         });
 
-        match super::run_briefing(core, since).await {
+        // Delegate to `run_daily_briefing` so the scheduler tick contends for
+        // the same single-flight lock as the HTTP route. `run_daily_briefing`
+        // also computes `since` from the persisted `last_run` (same 7-day
+        // first-run lookback) and persists a fresh `last_run` on success.
+        match core.run_daily_briefing().await {
             Ok(result) => {
-                // Persist last_run so subsequent ticks correctly skip until
-                // the next interval elapses.
-                if let Err(e) = task_state::set_last_run(core, TASK_ID, Utc::now()) {
-                    tracing::warn!(
-                        task_id = TASK_ID,
-                        error = %e,
-                        "[scheduler] Failed to persist task last_run"
-                    );
-                }
                 (ctx.event_cb)(TaskEvent::Completed {
                     task_id: TASK_ID.to_string(),
                     db_id,

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronRight, RefreshCw } from 'lucide-react';
+import { ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react';
 import { SigmaCanvas } from '../../canvas/SigmaCanvas';
 import { CitationPopover } from '../../wiki/CitationPopover';
 import { BriefingContent } from './BriefingContent';
@@ -38,9 +38,13 @@ export function BriefingWidget() {
   const setViewMode = useUIStore(s => s.setViewMode);
   const isMobile = useIsMobile();
 
-  const latest = useBriefingStore(s => s.latest);
+  const active = useBriefingStore(s => s.active);
+  const history = useBriefingStore(s => s.history);
+  const activeIndex = useBriefingStore(s => s.activeIndex);
+  const isLoading = useBriefingStore(s => s.isLoading);
   const isRunning = useBriefingStore(s => s.isRunning);
   const fetchLatest = useBriefingStore(s => s.fetchLatest);
+  const navigate = useBriefingStore(s => s.navigate);
   const runNow = useBriefingStore(s => s.runNow);
 
   // Load on mount and re-fetch whenever the backend emits briefing-ready.
@@ -106,14 +110,36 @@ export function BriefingWidget() {
 
   // ===== Render =====
 
-  const hasBriefing = latest !== null;
+  const hasBriefing = active !== null;
+  const canGoNewer = activeIndex > 0;
+  const canGoOlder = activeIndex < history.length - 1;
   const eyebrowLabel = hasBriefing
-    ? `TODAY'S BRIEFING · ${formatRelativeDate(latest!.briefing.created_at).toUpperCase()}`
+    ? `BRIEFING · ${formatRelativeDate(active!.briefing.created_at).toUpperCase()}`
     : formatToday(now);
 
   return (
     <div className="pb-2">
-      <div className="flex items-center gap-3 mb-3">
+      <div className="flex items-center gap-2 mb-3">
+        {hasBriefing && (
+          <>
+            <button
+              onClick={() => navigate(1)}
+              disabled={!canGoOlder || isLoading}
+              title="Older briefing"
+              className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              <ChevronLeft className="w-4 h-4" strokeWidth={2} />
+            </button>
+            <button
+              onClick={() => navigate(-1)}
+              disabled={!canGoNewer || isLoading}
+              title="Newer briefing"
+              className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              <ChevronRight className="w-4 h-4" strokeWidth={2} />
+            </button>
+          </>
+        )}
         <div className="text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--color-text-tertiary)]">
           {eyebrowLabel}
         </div>
@@ -121,7 +147,7 @@ export function BriefingWidget() {
           onClick={() => runNow()}
           disabled={isRunning}
           title="Regenerate briefing now"
-          className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors disabled:opacity-50 disabled:cursor-wait"
+          className="ml-1 text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors disabled:opacity-50 disabled:cursor-wait"
         >
           <RefreshCw className={`w-3 h-3 ${isRunning ? 'animate-spin' : ''}`} strokeWidth={2} />
         </button>
@@ -149,8 +175,8 @@ export function BriefingWidget() {
 
       {hasBriefing ? (
         <BriefingContent
-          content={latest!.briefing.content}
-          citations={latest!.citations}
+          content={active!.briefing.content}
+          citations={active!.citations}
           onCitationClick={handleCitationClick}
         />
       ) : (
@@ -180,7 +206,7 @@ export function BriefingWidget() {
 
       {hasBriefing && (
         <div className="mt-4 text-[12px] text-[var(--color-text-tertiary)]">
-          Covers {latest!.briefing.atom_count} new atom{latest!.briefing.atom_count === 1 ? '' : 's'}
+          Covers {active!.briefing.atom_count} new atom{active!.briefing.atom_count === 1 ? '' : 's'}
         </div>
       )}
 

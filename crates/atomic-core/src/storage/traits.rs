@@ -704,6 +704,12 @@ pub trait BriefingStore: Send + Sync {
         &self,
     ) -> StorageResult<Option<crate::briefing::BriefingWithCitations>>;
 
+    /// Fetch a specific briefing by id (joined with citations).
+    async fn get_briefing(
+        &self,
+        id: &str,
+    ) -> StorageResult<Option<crate::briefing::BriefingWithCitations>>;
+
     /// List recent briefings (without citations) for a lightweight history view.
     async fn list_briefings(
         &self,
