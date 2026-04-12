@@ -161,10 +161,9 @@ export function SigmaCanvas({ mode = 'main', onPreviewClick }: SigmaCanvasProps 
     }
 
     const sigma = new Sigma(graph, container, {
-      renderLabels: true,
-      labelRenderedSizeThreshold: 7,
-      labelSize: 12,
-      labelColor: { color: theme.nodeLabelColor },
+      // Atom labels are drawn manually on the overlay canvas (drawLabels) with
+      // real collision detection, so Sigma's built-in label pass is disabled.
+      renderLabels: false,
       labelFont: 'system-ui, -apple-system, sans-serif',
       defaultEdgeColor: '#333',
       defaultNodeColor: '#555',
@@ -248,7 +247,7 @@ export function SigmaCanvas({ mode = 'main', onPreviewClick }: SigmaCanvasProps 
     labelCanvas.style.zIndex = '10';
     container.appendChild(labelCanvas);
 
-    function drawClusterLabels() {
+    function drawLabels() {
       const width = container!.clientWidth;
       const height = container!.clientHeight;
       const ratio = window.devicePixelRatio || 1;
@@ -263,21 +262,34 @@ export function SigmaCanvas({ mode = 'main', onPreviewClick }: SigmaCanvasProps 
       ctx.clearRect(0, 0, width, height);
 
       const t = themeRef.current;
-      const fontSize = 13;
-      ctx.font = `600 ${fontSize}px system-ui, -apple-system, sans-serif`;
+
+      // Shared collision list — atom labels avoid cluster pills and vice versa.
+      const placed: { x: number; y: number; w: number; h: number }[] = [];
+      function collides(rect: { x: number; y: number; w: number; h: number }, pad: number) {
+        for (const p of placed) {
+          if (
+            rect.x - pad < p.x + p.w &&
+            rect.x + rect.w + pad > p.x &&
+            rect.y - pad < p.y + p.h &&
+            rect.y + rect.h + pad > p.y
+          ) return true;
+        }
+        return false;
+      }
+
+      // === Cluster labels (highest priority — placed first) ===
+      const clusterFontSize = 13;
+      ctx.font = `600 ${clusterFontSize}px system-ui, -apple-system, sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
 
-      const sorted = [...data!.clusters].sort((a, b) => b.atom_count - a.atom_count);
-      const placed: { x: number; y: number; w: number; h: number }[] = [];
+      const sortedClusters = [...data!.clusters].sort((a, b) => b.atom_count - a.atom_count);
+      const maxClusterLabels = Math.max(4, Math.floor((width * height) / 40000));
+      const clusterPad = 24;
+      let clusterCount = 0;
 
-      // Limit total labels: at most 1 label per 40,000px² of viewport
-      const maxLabels = Math.max(4, Math.floor((width * height) / 40000));
-      // Minimum gap between labels so they don't pack edge-to-edge
-      const pad = 24;
-
-      for (const cluster of sorted) {
-        if (placed.length >= maxLabels) break;
+      for (const cluster of sortedClusters) {
+        if (clusterCount >= maxClusterLabels) break;
 
         // Compute centroid from actual current node positions
         let cx = 0, cy = 0, count = 0;
@@ -295,7 +307,7 @@ export function SigmaCanvas({ mode = 'main', onPreviewClick }: SigmaCanvasProps 
         const labelY = pos.y - 20;
         const metrics = ctx.measureText(cluster.label);
         const pillW = metrics.width + 16;
-        const pillH = fontSize + 8;
+        const pillH = clusterFontSize + 8;
         const rect = {
           x: pos.x - pillW / 2,
           y: labelY - pillH / 2,
@@ -303,15 +315,9 @@ export function SigmaCanvas({ mode = 'main', onPreviewClick }: SigmaCanvasProps 
           h: pillH,
         };
 
-        // Check overlap using padded bounding boxes for spacing
-        const overlaps = placed.some(p =>
-          rect.x - pad < p.x + p.w &&
-          rect.x + rect.w + pad > p.x &&
-          rect.y - pad < p.y + p.h &&
-          rect.y + rect.h + pad > p.y
-        );
-        if (overlaps) continue;
+        if (collides(rect, clusterPad)) continue;
         placed.push(rect);
+        clusterCount++;
 
         ctx.fillStyle = t.labelBg;
         ctx.beginPath();
@@ -324,10 +330,50 @@ export function SigmaCanvas({ mode = 'main', onPreviewClick }: SigmaCanvasProps 
         ctx.fillStyle = t.labelColor;
         ctx.fillText(cluster.label, pos.x, labelY);
       }
+
+      // === Atom labels (collision-checked against everything already placed) ===
+      const atomFontSize = 12;
+      ctx.font = `${atomFontSize}px system-ui, -apple-system, sans-serif`;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+
+      const tagFilter = selectedTagRef.current;
+      const minRenderedSize = 4;
+      const atomLabelPad = 20;
+
+      type Cand = { vx: number; vy: number; rsize: number; label: string };
+      const candidates: Cand[] = [];
+      graph!.forEachNode((_id, attrs) => {
+        if (tagFilter) {
+          const tagIds = (attrs as any).tagIds as string[] | undefined;
+          if (!tagIds?.includes(tagFilter)) return;
+        }
+        const rsize = sigma!.scaleSize(attrs.size as number);
+        if (rsize < minRenderedSize) return;
+        const pos = sigma!.graphToViewport({ x: attrs.x as number, y: attrs.y as number });
+        // Cull off-screen — generous horizontal margin so labels near the edge still render
+        if (pos.x < -200 || pos.x > width + 50 || pos.y < -30 || pos.y > height + 30) return;
+        const label = (attrs.label as string) || '';
+        if (!label) return;
+        candidates.push({ vx: pos.x, vy: pos.y, rsize, label });
+      });
+      // Largest (most-connected) nodes win label slots in dense regions
+      candidates.sort((a, b) => b.rsize - a.rsize);
+
+      ctx.fillStyle = t.nodeLabelColor;
+      for (const c of candidates) {
+        const tw = ctx.measureText(c.label).width;
+        const lx = c.vx + c.rsize + 4;
+        const ly = c.vy;
+        const rect = { x: lx, y: ly - atomFontSize / 2, w: tw, h: atomFontSize };
+        if (collides(rect, atomLabelPad)) continue;
+        placed.push(rect);
+        ctx.fillText(c.label, lx, ly);
+      }
     }
 
-    sigma.on('afterRender', drawClusterLabels);
-    requestAnimationFrame(drawClusterLabels);
+    sigma.on('afterRender', drawLabels);
+    requestAnimationFrame(drawLabels);
 
     // Lock the bounding box to the final layout so Sigma doesn't
     // recompute normalization as nodes move from center outward
@@ -478,10 +524,8 @@ export function SigmaCanvas({ mode = 'main', onPreviewClick }: SigmaCanvasProps 
       graph.setNodeAttribute(node, 'color', nodeColor(theme, connectivity, (attrs as any).clusterIndex));
     });
 
-    // Update sigma label color setting
-    sigma.setSetting('labelColor', { color: theme.nodeLabelColor });
-
-    // Edges update via edgeReducer (reads themeRef.current)
+    // Atom label color comes from themeRef inside drawLabels — just trigger a refresh.
+    // Edges update via edgeReducer (also reads themeRef.current).
     sigma.refresh();
   }, [theme]);
 
