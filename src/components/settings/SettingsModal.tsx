@@ -57,8 +57,9 @@ import {
   type FeedPollResult,
 } from '../../lib/api';
 import { getTransport, switchTransport, switchToLocal, isDesktopApp, isLocalServer, getMcpBridgePath, type HttpTransportConfig } from '../../lib/transport';
-import { pickDirectory } from '../../lib/platform';
+import { pickDirectory, isMacOS } from '../../lib/platform';
 import { importMarkdownFolder, type ImportProgress } from '../../lib/import';
+import { importAppleNotes } from '../../lib/import-apple-notes';
 import { formatRelativeDate } from '../../lib/date';
 import { useDatabasesStore, type DatabaseInfo, type DatabaseStats } from '../../stores/databases';
 
@@ -1078,6 +1079,32 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
       setImportResult(result);
 
       // Refresh atoms and tags to show imported content
+      if (result.imported > 0) {
+        await Promise.all([fetchAtoms(), fetchTags()]);
+      }
+    } catch (e) {
+      setImportError(String(e));
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
+  const handleAppleNotesImport = async () => {
+    setImportResult(null);
+    setImportError(null);
+    setImportProgress(null);
+
+    try {
+      const selected = await pickDirectory('Select "group.com.apple.notes" folder');
+      if (!selected) return;
+
+      setIsImporting(true);
+      const result = await importAppleNotes(selected, {
+        importTags,
+        onProgress: setImportProgress,
+      });
+      setImportResult(result);
+
       if (result.imported > 0) {
         await Promise.all([fetchAtoms(), fetchTags()]);
       }
@@ -2382,6 +2409,35 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                           </>
                         )}
                       </Button>
+
+                      {isMacOS() && (
+                        <>
+                          <Button
+                            variant="secondary"
+                            onClick={handleAppleNotesImport}
+                            disabled={isImporting}
+                            className="w-full justify-center"
+                          >
+                            {isImporting ? (
+                              <>
+                                <Loader2 className="w-4 h-4 animate-spin mr-2" strokeWidth={2} />
+                                {importProgress
+                                  ? `Importing ${importProgress.current}/${importProgress.total}...`
+                                  : 'Importing...'}
+                              </>
+                            ) : (
+                              <>
+                                <Upload className="w-4 h-4 mr-2" strokeWidth={2} />
+                                Import from Apple Notes
+                              </>
+                            )}
+                          </Button>
+                          <p className="text-xs text-[var(--color-text-secondary)]">
+                            Select <code className="text-[var(--color-text-primary)]">~/Library/Group Containers/group.com.apple.notes</code>.
+                            Requires Full Disk Access for Atomic in System Settings → Privacy &amp; Security.
+                          </p>
+                        </>
+                      )}
 
                       {/* Import Result */}
                       {importResult && (
