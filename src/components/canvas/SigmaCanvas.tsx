@@ -21,6 +21,12 @@ function truncLabel(str: string, max: number): string {
   return str.length > max ? str.substring(0, max - 1) + '\u2026' : str;
 }
 
+function parseRgbColor(s: string): [number, number, number] | null {
+  const m = s.match(/^rgb\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)\)$/);
+  if (!m) return null;
+  return [+m[1], +m[2], +m[3]];
+}
+
 export type SigmaCanvasMode = 'main' | 'preview';
 
 interface SigmaCanvasProps {
@@ -49,6 +55,15 @@ export function SigmaCanvas({ mode = 'main', onPreviewClick }: SigmaCanvasProps 
   const edgeAnimProgress = useRef(0); // 0 = invisible, 1 = fully visible
   const themeRef = useRef(theme);
   themeRef.current = theme;
+
+  // Hover emphasis: when a node is hovered, dim everything outside its neighborhood.
+  // neighborsRef lets the edge/node reducers answer "is X a neighbor of hovered?" in O(1).
+  const hoveredNodeRef = useRef<string | null>(null);
+  const neighborsRef = useRef<Map<string, Set<string>>>(new Map());
+  // hoverAnim: 0 = no emphasis, 1 = fully emphasized. Reducers interpolate
+  // against this so the enter/leave transitions fade instead of snapping.
+  const hoverAnimRef = useRef(0);
+  const hoverTargetRef = useRef(0);
 
   // Atom preview popover state
   const [previewAtomId, setPreviewAtomId] = useState<string | null>(null);
@@ -150,6 +165,7 @@ export function SigmaCanvas({ mode = 'main', onPreviewClick }: SigmaCanvasProps 
     }
     const wRange = Math.max(maxW - minW, 0.001);
 
+    const neighbors = new Map<string, Set<string>>();
     for (const edge of data.edges) {
       if (!graph.hasNode(edge.source) || !graph.hasNode(edge.target)) continue;
       if (graph.hasEdge(edge.source, edge.target) || graph.hasEdge(edge.target, edge.source)) continue;
@@ -158,7 +174,12 @@ export function SigmaCanvas({ mode = 'main', onPreviewClick }: SigmaCanvasProps 
         weight: w,
         type: 'curved',
       });
+      if (!neighbors.has(edge.source)) neighbors.set(edge.source, new Set());
+      if (!neighbors.has(edge.target)) neighbors.set(edge.target, new Set());
+      neighbors.get(edge.source)!.add(edge.target);
+      neighbors.get(edge.target)!.add(edge.source);
     }
+    neighborsRef.current = neighbors;
 
     const sigma = new Sigma(graph, container, {
       // Atom labels are drawn manually on the overlay canvas (drawLabels) with
@@ -168,48 +189,38 @@ export function SigmaCanvas({ mode = 'main', onPreviewClick }: SigmaCanvasProps 
       defaultEdgeColor: '#333',
       defaultNodeColor: '#555',
       defaultEdgeType: 'curved',
+      // Sort by the reducer's zIndex so hover-incident edges paint above the
+      // dimmed background edges.
+      zIndex: true,
       edgeProgramClasses: {
         curved: EdgeCurveProgram,
       },
       minCameraRatio: 0.01,
       maxCameraRatio: 10,
       stagePadding: 40,
-      defaultDrawNodeHover: (context, data, settings) => {
-        const size = data.size || 4;
-        const label = (data as any).fullLabel || data.label || '';
-        const font = `${settings.labelFont || 'sans-serif'}`;
-        const fontSize = 13;
-        context.font = `${fontSize}px ${font}`;
-        const textWidth = context.measureText(label).width;
-        const padding = 6;
-        const boxW = textWidth + padding * 2;
-        const boxH = fontSize + padding * 2;
-        const x = data.x + size + 4;
-        const y = data.y - boxH / 2;
-
-        // Dark pill background
-        context.fillStyle = 'rgba(20, 20, 20, 0.92)';
-        context.beginPath();
-        context.roundRect(x, y, boxW, boxH, 4);
-        context.fill();
-        context.strokeStyle = 'rgba(255, 255, 255, 0.1)';
-        context.lineWidth = 0.5;
-        context.stroke();
-
-        // Text
-        context.fillStyle = '#d0d0d0';
-        context.textAlign = 'left';
-        context.textBaseline = 'middle';
-        context.fillText(label, x + padding, data.y);
-
-        // Highlight ring on the node
-        context.beginPath();
-        context.arc(data.x, data.y, size + 2, 0, Math.PI * 2);
-        context.strokeStyle = 'rgba(255, 255, 255, 0.3)';
-        context.lineWidth = 1.5;
-        context.stroke();
-      },
-      nodeReducer: (_node, attrs) => {
+      // Hover pill + ring are drawn on our own labelCanvas (drawLabels) so
+      // they stack above atom/cluster labels. Sigma's hover canvas sits below
+      // labelCanvas, so drawing the hover pill here would render it behind.
+      defaultDrawNodeHover: () => {},
+      nodeReducer: (node, attrs) => {
+        const hovered = hoveredNodeRef.current;
+        if (hovered) {
+          if (node === hovered) return { ...attrs, zIndex: 2 };
+          const isNeighbor = neighborsRef.current.get(hovered)?.has(node);
+          if (isNeighbor) return { ...attrs, zIndex: 1 };
+          // Lerp node color toward dark grey and shrink, driven by hoverAnim.
+          const h = hoverAnimRef.current;
+          const rgb = parseRgbColor(attrs.color as string);
+          const color = rgb
+            ? `rgb(${Math.round(rgb[0] + (60 - rgb[0]) * h)},${Math.round(rgb[1] + (60 - rgb[1]) * h)},${Math.round(rgb[2] + (60 - rgb[2]) * h)})`
+            : attrs.color;
+          return {
+            ...attrs,
+            color,
+            size: (attrs.size || 4) * (1 - 0.45 * h),
+            label: h > 0.5 ? '' : (attrs.label as string),
+          };
+        }
         const tagId = selectedTagRef.current;
         if (!tagId) return attrs;
         const tagIds = (attrs as any).tagIds as string[] | undefined;
@@ -222,13 +233,36 @@ export function SigmaCanvas({ mode = 'main', onPreviewClick }: SigmaCanvasProps 
           label: '',
         };
       },
-      edgeReducer: (_edge, attrs) => {
+      edgeReducer: (edge, attrs) => {
         const w = (attrs as any).weight ?? 0.5;
+        const hovered = hoveredNodeRef.current;
+        const t = themeRef.current;
+        const anim = edgeAnimProgress.current;
+        if (hovered) {
+          const g = graphRef.current!;
+          const touches = g.source(edge) === hovered || g.target(edge) === hovered;
+          const h = hoverAnimRef.current;
+          if (touches) {
+            // Lerp brightness + size from normal → emphasized.
+            const bright = w * anim * (1 + 0.4 * h);
+            const size = (0.2 + w * 0.7) * anim + ((0.5 + w * 1.2) * anim - (0.2 + w * 0.7) * anim) * h;
+            return {
+              ...attrs,
+              color: edgeColor(t, Math.min(1, bright)),
+              size,
+              zIndex: 1,
+            };
+          }
+          // Non-incident: fade color toward edgeMin (naturally dim) and shrink.
+          return {
+            ...attrs,
+            color: edgeColor(t, w * anim * (1 - h)),
+            size: (0.2 + w * 0.7) * anim * (1 - h),
+          };
+        }
         if (w < edgeThresholdRef.current) {
           return { ...attrs, hidden: true };
         }
-        const t = themeRef.current;
-        const anim = edgeAnimProgress.current;
         return {
           ...attrs,
           color: edgeColor(t, w * anim),
@@ -246,6 +280,7 @@ export function SigmaCanvas({ mode = 'main', onPreviewClick }: SigmaCanvasProps 
     labelCanvas.style.pointerEvents = 'none';
     labelCanvas.style.zIndex = '10';
     container.appendChild(labelCanvas);
+
 
     function drawLabels() {
       const width = container!.clientWidth;
@@ -369,6 +404,51 @@ export function SigmaCanvas({ mode = 'main', onPreviewClick }: SigmaCanvasProps 
         if (collides(rect, atomLabelPad)) continue;
         placed.push(rect);
         ctx.fillText(c.label, lx, ly);
+      }
+
+      // === Hover pill + ring (drawn last so it paints above everything) ===
+      const hoveredId = hoveredNodeRef.current;
+      const hAnim = hoverAnimRef.current;
+      if (hoveredId && hAnim > 0.01 && graph!.hasNode(hoveredId)) {
+        const hAttrs = graph!.getNodeAttributes(hoveredId);
+        const hPos = sigma!.graphToViewport({ x: hAttrs.x as number, y: hAttrs.y as number });
+        const hSize = sigma!.scaleSize(hAttrs.size as number);
+        const hLabel = ((hAttrs as any).fullLabel as string) || (hAttrs.label as string) || '';
+
+        ctx.globalAlpha = hAnim;
+
+        // Ring on the node
+        ctx.beginPath();
+        ctx.arc(hPos.x, hPos.y, hSize + 2, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        if (hLabel) {
+          const pillFont = 13;
+          ctx.font = `${pillFont}px system-ui, -apple-system, sans-serif`;
+          const tw = ctx.measureText(hLabel).width;
+          const pad = 6;
+          const pillW = tw + pad * 2;
+          const pillH = pillFont + pad * 2;
+          const px = hPos.x + hSize + 4;
+          const py = hPos.y - pillH / 2;
+
+          ctx.fillStyle = 'rgba(20, 20, 20, 0.92)';
+          ctx.beginPath();
+          ctx.roundRect(px, py, pillW, pillH, 4);
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+          ctx.lineWidth = 0.5;
+          ctx.stroke();
+
+          ctx.fillStyle = '#e8e8e8';
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(hLabel, px + pad, hPos.y);
+        }
+
+        ctx.globalAlpha = 1;
       }
     }
 
@@ -494,6 +574,35 @@ export function SigmaCanvas({ mode = 'main', onPreviewClick }: SigmaCanvasProps 
     } else {
       sigma.on('clickNode', ({ node }) => {
         showAtomPreview(node);
+      });
+      // Hover animation: exponential ease toward target (0 or 1).
+      // Loop stops itself when target is reached, so idle cost is zero.
+      let hoverRaf: number | null = null;
+      const tickHover = () => {
+        const diff = hoverTargetRef.current - hoverAnimRef.current;
+        if (Math.abs(diff) < 0.005) {
+          hoverAnimRef.current = hoverTargetRef.current;
+          if (hoverTargetRef.current === 0) hoveredNodeRef.current = null;
+          sigma.refresh();
+          hoverRaf = null;
+          return;
+        }
+        hoverAnimRef.current += diff * 0.22; // ~10–12 frames to close
+        sigma.refresh();
+        hoverRaf = requestAnimationFrame(tickHover);
+      };
+      const startHoverAnim = () => {
+        if (hoverRaf !== null) return;
+        hoverRaf = requestAnimationFrame(tickHover);
+      };
+      sigma.on('enterNode', ({ node }) => {
+        hoveredNodeRef.current = node;
+        hoverTargetRef.current = 1;
+        startHoverAnim();
+      });
+      sigma.on('leaveNode', () => {
+        hoverTargetRef.current = 0;
+        startHoverAnim();
       });
       const { registerController, setCanvasData } = useCanvasStore.getState();
       setCanvasData(data);
