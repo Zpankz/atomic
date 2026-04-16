@@ -58,22 +58,12 @@ impl StorageBackend {
         }
     }
 
-    /// Get the underlying Database for operations not yet migrated to storage traits.
-    /// Returns None for Postgres backend.
-    pub(crate) fn sqlite_db(&self) -> Option<&std::sync::Arc<crate::db::Database>> {
-        match self {
-            StorageBackend::Sqlite(s) => Some(&s.db),
-            #[cfg(feature = "postgres")]
-            StorageBackend::Postgres(_) => None,
-        }
-    }
-
     /// Get pipeline status (embedding counts + failed atoms).
-    pub(crate) fn get_pipeline_status(&self) -> Result<crate::models::PipelineStatus, AtomicCoreError> {
+    pub(crate) async fn get_pipeline_status(&self) -> Result<crate::models::PipelineStatus, AtomicCoreError> {
         match self {
             StorageBackend::Sqlite(s) => s.get_pipeline_status_sync(),
             #[cfg(feature = "postgres")]
-            StorageBackend::Postgres(s) => s.get_pipeline_status_sync(),
+            StorageBackend::Postgres(s) => s.get_pipeline_status_impl().await,
         }
     }
 
@@ -87,69 +77,16 @@ impl StorageBackend {
     }
 }
 
-/// Dedicated tokio runtime for Postgres async operations.
-///
-/// The sync→async bridge problem:
-/// - actix-web workers use `current_thread` tokio → `block_in_place` panics
-/// - `handle.block_on()` from a child thread deadlocks on `current_thread`
-/// - A new runtime per call can't share the sqlx pool (pool is runtime-bound)
-///
-/// Solution: one shared multi-thread runtime created at process start.
-/// The sqlx pool is created on THIS runtime (via `connect()` called from
-/// `open_postgres()` which runs on the main runtime before actix starts).
-/// All sync dispatch calls send work here and block on the result.
-#[cfg(feature = "postgres")]
-static PG_RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()
-        .expect("Failed to create Postgres runtime")
-});
-
-/// Bridge an async Postgres call to sync on the dedicated PG_RUNTIME.
-///
-/// If called from within a tokio runtime (e.g., actix-web handler or `#[tokio::main]`),
-/// moves to a background thread to avoid "cannot start a runtime from within a runtime".
-/// If called from a non-async context, calls `block_on` directly.
-#[cfg(feature = "postgres")]
-fn block_on<F: std::future::Future + Send>(f: F) -> F::Output
-where
-    F::Output: Send,
-{
-    if tokio::runtime::Handle::try_current().is_ok() {
-        // We're inside a tokio runtime — can't call block_on directly.
-        // Move to a plain thread where block_on is safe.
-        std::thread::scope(|s| {
-            s.spawn(|| PG_RUNTIME.block_on(f))
-                .join()
-                .expect("PG_RUNTIME bridge thread panicked")
-        })
-    } else {
-        // No active runtime — call block_on directly.
-        PG_RUNTIME.block_on(f)
-    }
-}
-
-/// Public version for use by PostgresStorage::connect and initialize.
-#[cfg(feature = "postgres")]
-pub fn pg_runtime_block_on<F: std::future::Future + Send>(f: F) -> F::Output
-where
-    F::Output: Send,
-{
-    block_on(f)
-}
-
-// ==================== Sync dispatch methods ====================
+// ==================== Async dispatch methods ====================
 //
 // Each method dispatches to either the SqliteStorage sync helper
-// or the PostgresStorage async trait method (via block_on).
-// This keeps AtomicCore's public API synchronous while supporting
-// both backends at runtime.
+// or the PostgresStorage async trait method (called directly).
+// SQLite: direct sync call (fast, avoids clone/spawn overhead).
+// Postgres: native async — the sqlx future runs on the caller's runtime.
 
-/// Macro to generate dispatch methods. For each method:
-/// - SQLite: calls `s.$sqlite_method($($arg),*)`
-/// - Postgres: calls `block_on(<TraitName>::$trait_method(s, $($arg),*))`
+/// Macro to generate async dispatch methods. For each method:
+/// - SQLite: calls `s.$sqlite_method($($arg),*)` (sync, sub-ms)
+/// - Postgres: calls `<TraitName>::$trait_method(s, $($arg),*).await`
 macro_rules! dispatch {
     (
         $(
@@ -159,12 +96,12 @@ macro_rules! dispatch {
     ) => {
         impl StorageBackend {
             $(
-                pub(crate) fn $name(&self $(, $arg: $argty)*) -> $ret {
+                pub(crate) async fn $name(&self $(, $arg: $argty)*) -> $ret {
                     match self {
                         StorageBackend::Sqlite(s) => s.$sqlite_method($($arg),*),
                         #[cfg(feature = "postgres")]
                         StorageBackend::Postgres(s) => {
-                            block_on(<PostgresStorage as $trait_name>::$pg_method(s $(, $arg)*))
+                            <PostgresStorage as $trait_name>::$pg_method(s $(, $arg)*).await
                         }
                     }
                 }
@@ -230,12 +167,8 @@ dispatch! {
         => sqlite: count_pending_embeddings_sync, pg_trait: AtomStore, pg_method: count_pending_embeddings;
     fn get_all_embedding_pairs_sync(&self) -> Result<Vec<(String, Vec<f32>)>, AtomicCoreError>
         => sqlite: get_all_embedding_pairs_sync, pg_trait: AtomStore, pg_method: get_all_embedding_pairs;
-    fn get_top_k_canvas_edges_sync(&self, top_k: usize) -> Result<Vec<CanvasEdgeData>, AtomicCoreError>
-        => sqlite: get_top_k_canvas_edges_sync, pg_trait: AtomStore, pg_method: get_top_k_canvas_edges;
     fn get_all_atom_tag_ids_sync(&self) -> Result<std::collections::HashMap<String, Vec<String>>, AtomicCoreError>
         => sqlite: get_all_atom_tag_ids_sync, pg_trait: AtomStore, pg_method: get_all_atom_tag_ids;
-    fn get_canvas_atom_metadata_sync(&self) -> Result<Vec<CanvasAtomPosition>, AtomicCoreError>
-        => sqlite: get_canvas_atom_metadata_sync, pg_trait: AtomStore, pg_method: get_canvas_atom_metadata;
     fn get_canvas_atom_metadata_light_sync(&self) -> Result<Vec<(String, String, Option<String>, i32, Option<String>)>, AtomicCoreError>
         => sqlite: get_canvas_atom_metadata_light_sync, pg_trait: AtomStore, pg_method: get_canvas_atom_metadata_light;
 
@@ -270,8 +203,6 @@ dispatch! {
         => sqlite: get_tag_tree_for_llm_impl, pg_trait: TagStore, pg_method: get_tag_tree_for_llm;
     fn compute_tag_centroids_batch_impl(&self, tag_ids: &[String]) -> Result<(), AtomicCoreError>
         => sqlite: compute_tag_centroids_batch_impl, pg_trait: TagStore, pg_method: compute_tag_centroids_batch;
-    fn cleanup_orphaned_parents_impl(&self, tag_id: &str) -> Result<(), AtomicCoreError>
-        => sqlite: cleanup_orphaned_parents_impl, pg_trait: TagStore, pg_method: cleanup_orphaned_parents;
     fn get_tag_hierarchy_impl(&self, tag_id: &str) -> Result<Vec<String>, AtomicCoreError>
         => sqlite: get_tag_hierarchy_impl, pg_trait: TagStore, pg_method: get_tag_hierarchy;
     fn count_atoms_with_tags_impl(&self, tag_ids: &[String]) -> Result<i32, AtomicCoreError>
@@ -318,8 +249,6 @@ dispatch! {
         => sqlite: rebuild_fts_index_sync, pg_trait: ChunkStore, pg_method: rebuild_fts_index;
     fn claim_pending_tagging_sync(&self) -> Result<Vec<String>, AtomicCoreError>
         => sqlite: claim_pending_tagging_sync, pg_trait: ChunkStore, pg_method: claim_pending_tagging;
-    fn get_embedding_dimension_sync(&self) -> Result<Option<usize>, AtomicCoreError>
-        => sqlite: get_embedding_dimension_sync, pg_trait: ChunkStore, pg_method: get_embedding_dimension;
     fn recreate_vector_index_sync(&self, dimension: usize) -> Result<(), AtomicCoreError>
         => sqlite: recreate_vector_index_sync, pg_trait: ChunkStore, pg_method: recreate_vector_index;
     fn claim_pending_reembedding_sync(&self) -> Result<Vec<String>, AtomicCoreError>
@@ -416,8 +345,6 @@ dispatch! {
         => sqlite: get_briefing_sync, pg_trait: BriefingStore, pg_method: get_briefing;
     fn list_briefings_sync(&self, limit: i32) -> Result<Vec<crate::briefing::Briefing>, AtomicCoreError>
         => sqlite: list_briefings_sync, pg_trait: BriefingStore, pg_method: list_briefings;
-    fn delete_briefing_sync(&self, id: &str) -> Result<(), AtomicCoreError>
-        => sqlite: delete_briefing_sync, pg_trait: BriefingStore, pg_method: delete_briefing;
 
     // ---- FeedStore ----
     fn list_feeds_sync(&self) -> Result<Vec<Feed>, AtomicCoreError>
