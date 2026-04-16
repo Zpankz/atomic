@@ -73,10 +73,10 @@ export class OnboardingModal extends Modal {
   // --- Step 1: Welcome ---
 
   private renderWelcome(container: HTMLElement): void {
-    container.createEl("h2", { text: "Welcome to Atomic" });
+    container.createEl("h2", { text: "Welcome" });
     container.createEl("p", {
       cls: "atomic-onboarding-desc",
-      text: "Atomic turns your notes into a semantically-connected knowledge graph. This plugin syncs your vault to Atomic so you can:",
+      text: "This plugin turns your notes into a semantically-connected knowledge graph by syncing your vault to a knowledge base. It lets you:",
     });
 
     const features = container.createEl("ul", { cls: "atomic-onboarding-features" });
@@ -102,7 +102,7 @@ export class OnboardingModal extends Modal {
     container.createEl("h2", { text: "Connect to your server" });
     container.createEl("p", {
       cls: "atomic-onboarding-desc",
-      text: "Enter the URL and API token for your Atomic server.",
+      text: "Enter the URL and API token for your server.",
     });
 
     const form = container.createDiv({ cls: "atomic-onboarding-form" });

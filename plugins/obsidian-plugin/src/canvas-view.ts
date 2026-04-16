@@ -43,7 +43,7 @@ export class CanvasView extends ItemView {
 
     try {
       if (!this.plugin.settings.authToken) {
-        statusEl.textContent = "Connect Atomic first via the setup wizard.";
+        statusEl.textContent = "Run the setup wizard to connect before opening the canvas.";
         return;
       }
 

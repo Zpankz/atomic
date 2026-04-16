@@ -44,7 +44,7 @@ export class AtomicSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Server URL")
-      .setDesc("URL of your Atomic server instance")
+      .setDesc("URL of your server instance")
       .addText((text) =>
         text
           .setPlaceholder("Example: localhost:8080")
@@ -72,7 +72,7 @@ export class AtomicSettingTab extends PluginSettingTab {
     let dbDebounce: ReturnType<typeof setTimeout> | null = null;
     new Setting(containerEl)
       .setName("Database")
-      .setDesc("Name of the Atomic database to sync with (leave empty for default)")
+      .setDesc("Name of the database to sync with (leave empty for default)")
       .addText((text) =>
         text
           .setPlaceholder("Default")
@@ -96,7 +96,7 @@ export class AtomicSettingTab extends PluginSettingTab {
         button.setButtonText("Test").onClick(async () => {
           try {
             await this.plugin.client.testConnection();
-            new Notice("Connected to Atomic server successfully!");
+            new Notice("Connected successfully!");
           } catch (e) {
             new Notice(`Connection failed: ${e instanceof Error ? e.message : String(e)}`);
           }
@@ -107,7 +107,7 @@ export class AtomicSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Vault name")
-      .setDesc("Identifier used in source URLs (defaults to vault name)")
+      .setDesc("Identifier used in each atom's source URL (defaults to vault name)")
       .addText((text) =>
         text
           .setPlaceholder(this.app.vault.getName())
@@ -161,7 +161,7 @@ export class AtomicSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Delete on remove")
-      .setDesc("Delete atoms from Atomic when the note is deleted in Obsidian")
+      .setDesc("Remove the synced atom when the note is deleted from the vault")
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.deleteOnRemove).onChange(async (value) => {
           this.plugin.settings.deleteOnRemove = value;
