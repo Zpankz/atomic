@@ -1,5 +1,11 @@
 import { ensureSyntaxTree, syntaxTree } from '@codemirror/language';
-import { type EditorState, type Extension, type Range, StateField } from '@codemirror/state';
+import {
+  type EditorState,
+  type Extension,
+  type Range,
+  StateEffect,
+  StateField,
+} from '@codemirror/state';
 import {
   Decoration,
   type DecorationSet,
@@ -356,6 +362,63 @@ function buildDecorations(view: EditorView): DecorationSet {
   return Decoration.set(decos, true);
 }
 
+// --- Mouse-gesture freeze ---------------------------------------------------
+//
+// Our decorations hide/reveal markdown syntax based on which line the cursor
+// is on. If they rebuild between `mousedown` and `mouseup`, the revealed
+// syntax shifts the visible text and the two positions CM computes from the
+// click coordinates no longer match — yielding a brief range selection that
+// flashes on screen before being corrected, or cursors that land on the
+// wrong line. The fix is to *freeze* decoration rebuilds while a mouse
+// button is held. We rebuild once on mouseup.
+//
+// Implementation: a module-level `mouseDown` boolean is set from capture-
+// phase DOM listeners (NOT via `view.dispatch`). Dispatching a transaction
+// during mousedown interferes with CM's own drag-selection state machine —
+// it breaks click-and-drag. So we keep the signal purely in JS land and
+// just CHECK it from inside ViewPlugin.update. On mouseup we dispatch a
+// `rebuildDecoEffect` to trigger the catch-up rebuild.
+let mouseDown = false;
+const rebuildDecoEffect = StateEffect.define<null>();
+
+const mouseGestureTracker = ViewPlugin.fromClass(
+  class {
+    view: EditorView;
+    down = (e: MouseEvent) => {
+      if (e.button !== 0) return;
+      if (!this.view.contentDOM.contains(e.target as Node)) return;
+      mouseDown = true;
+    };
+    up = (e: MouseEvent) => {
+      if (e.button !== 0 || !mouseDown) return;
+      mouseDown = false;
+      this.view.dispatch({ effects: rebuildDecoEffect.of(null) });
+      (this.view as any).measure?.();
+    };
+    constructor(view: EditorView) {
+      this.view = view;
+      view.contentDOM.addEventListener('mousedown', this.down, true);
+      // mouseup listened at window so we still catch it if the user drags
+      // out of the editor before releasing.
+      window.addEventListener('mouseup', this.up, true);
+    }
+    destroy() {
+      this.view.contentDOM.removeEventListener('mousedown', this.down, true);
+      window.removeEventListener('mouseup', this.up, true);
+    }
+  }
+);
+
+function shouldRebuildOn(update: ViewUpdate): boolean {
+  if (update.docChanged || update.viewportChanged) return true;
+  // After mouseup, we dispatch rebuildDecoEffect to force one catch-up.
+  for (const tr of update.transactions) {
+    for (const e of tr.effects) if (e.is(rebuildDecoEffect)) return true;
+  }
+  if (update.selectionSet && !mouseDown) return true;
+  return false;
+}
+
 const richMarkdownPlugin = ViewPlugin.fromClass(
   class {
     decorations: DecorationSet;
@@ -363,7 +426,7 @@ const richMarkdownPlugin = ViewPlugin.fromClass(
       this.decorations = buildDecorations(view);
     }
     update(update: ViewUpdate) {
-      if (update.docChanged || update.viewportChanged || update.selectionSet) {
+      if (shouldRebuildOn(update)) {
         this.decorations = buildDecorations(update.view);
       }
     }
@@ -416,7 +479,12 @@ const imageField = StateField.define<DecorationSet>({
     return buildImageBlockDecorations(state);
   },
   update(value, tr) {
-    if (tr.docChanged || tr.selection) {
+    // Same mouse-gesture freeze as the ViewPlugin above: suppress rebuilds
+    // triggered by selection changes while the user is mid-click, rebuild
+    // when a `rebuildDecoEffect` arrives (dispatched on mouseup).
+    let forceRebuild = false;
+    for (const e of tr.effects) if (e.is(rebuildDecoEffect)) forceRebuild = true;
+    if (tr.docChanged || forceRebuild || (tr.selection && !mouseDown)) {
       return buildImageBlockDecorations(tr.state);
     }
     return value;
@@ -424,31 +492,21 @@ const imageField = StateField.define<DecorationSet>({
   provide: (f) => EditorView.decorations.from(f),
 });
 
-// Image click handler.
+// Whole-line image widgets: CM's `posAtCoords` doesn't reliably map a
+// click inside the replaced widget back to the widget's source line
+// (widgets are "atomic" to CM; the click coord can resolve to a nearby
+// unrelated line). We intercept such clicks and dispatch the selection
+// explicitly via `posAtDOM(IMG)` → widget's range start, then preventDefault
+// + return true so CM's own mousedown doesn't override us with a stale
+// heightmap result.
 //
-// Clicks on an image widget place the caret on the image's source line,
-// which flips `imageField`'s rendering from inline-replace to raw-
-// markdown-above-block-widget so the user can edit the URL / alt text.
-//
-// Two things that don't work, as background for why this is structured
-// the way it is:
-//   - `mousedown` + `dispatch` + `return false`: CM's own mousedown runs
-//     after and re-queries `posAtCoords` against the *rebuilt* layout,
-//     dispatching a different selection (some line above the image).
-//     That second dispatch wins.
-//   - `click`/`mouseup`: the IMG is detached during the rebuild so
-//     mouseup fires outside cm-content and the browser never dispatches
-//     a matching click.
-//
-// So: synchronous dispatch from mousedown + preventDefault + return true
-// so CM's handler loop breaks *before* basicMouseSelection runs (the
-// `if (event.defaultPrevented) break;` inside `runHandlers`).
-//
-// That alone leaves a known tradeoff: the decoration swap makes CM's
-// heightmap disagree with the DOM until the next measure cycle, so the
-// *next* click on another line can resolve to a stale pos via
-// `posAtCoords`. `armNextClickDomResolver` protects that very next
-// click by resolving its position from live DOM instead — see below.
+// We also arm a one-shot capture-phase listener on `contentDOM` that
+// handles THE VERY NEXT click — this survives the CM measure cycle
+// following the decoration swap, during which `posAtCoords` still
+// resolves stale positions for clicks on other lines. The listener
+// resolves its target caret from live DOM (`elementFromPoint` +
+// `caretRangeFromPoint`) instead of `posAtCoords`, and disarms after
+// one click.
 const imageClickHandler = EditorView.domEventHandlers({
   mousedown(event, view) {
     const target = event.target as HTMLElement | null;
@@ -461,18 +519,9 @@ const imageClickHandler = EditorView.domEventHandlers({
   },
 });
 
-// One-shot capture-phase mousedown listener armed right after an image
-// click. For the VERY NEXT click only, it resolves the target caret
-// position from live DOM (`elementFromPoint` + `caretRangeFromPoint` +
-// `posFromDOM`) instead of CM's `posAtCoords`, which consults the
-// heightmap — still stale for a frame or two after the image's
-// decoration swap, so its answer lands on the wrong line. Once it
-// handles a click (or bails on a modifier-key/image click), it disarms.
 function armNextClickDomResolver(view: EditorView) {
   const content = view.contentDOM;
-  const cleanup = () => {
-    content.removeEventListener('mousedown', handler, true);
-  };
+  const cleanup = () => content.removeEventListener('mousedown', handler, true);
   const handler = (e: MouseEvent) => {
     if (e.button !== 0 || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) {
       cleanup();
@@ -488,7 +537,6 @@ function armNextClickDomResolver(view: EditorView) {
     const pos = resolvePosFromPoint(view, line, e.clientX, e.clientY);
     view.dispatch({ selection: { anchor: pos } });
     view.focus();
-    // Stop CM's own mousedown from dispatching via the stale heightmap.
     e.preventDefault();
     e.stopImmediatePropagation();
   };
@@ -513,70 +561,21 @@ function resolvePosFromPoint(
       return r;
     });
   const range = getRange(x, y);
-  if (range) {
-    const { startContainer, startOffset } = range;
-    // Guard: make sure the resolved node is inside our cm-line (some
-    // browsers can return nodes outside when clicking in padding/margin).
-    if (line.contains(startContainer)) {
-      try {
-        return (view as any).docView.posFromDOM(startContainer, startOffset);
-      } catch {
-        /* fall through to line-start fallback */
-      }
+  if (range && line.contains(range.startContainer)) {
+    try {
+      return (view as any).docView.posFromDOM(range.startContainer, range.startOffset);
+    } catch {
+      /* fall through */
     }
   }
   return view.posAtDOM(line);
 }
 
-/**
- * Collapse accidental selections caused by hidden markdown expanding under
- * the cursor.
- *
- * Problem: when the user clicks inside a paragraph containing a link, the
- * mousedown lands at doc-pos A (computed against the collapsed visible
- * text). CM dispatches that selection, which flips the line to "active" and
- * reveals the previously-hidden `[...](...)` syntax. The line's visible
- * characters shift. Mouseup fires on the same *screen* coordinate, which
- * now maps to doc-pos B (≠ A). CM treats A..B as a drag-selection and the
- * user sees a chunk of text highlighted despite only clicking once.
- *
- * Fix: if the mouse didn't actually move between mousedown and mouseup
- * (within a small pixel threshold) and CM nevertheless produced a range
- * selection, collapse it back to the anchor. Real drag-selections — where
- * the pointer genuinely moved — are untouched.
- */
-const clickCollapseHandler = (() => {
-  let downX = 0, downY = 0, downShift = false;
-  return EditorView.domEventHandlers({
-    mousedown(event) {
-      if (event.button !== 0) return false;
-      downX = event.clientX;
-      downY = event.clientY;
-      // Shift/meta at mousedown means the user is extending or block-
-      // selecting on purpose — don't collapse on mouseup.
-      downShift = event.shiftKey || event.metaKey || event.ctrlKey || event.altKey;
-      return false;
-    },
-    mouseup(event, view) {
-      if (event.button !== 0) return false;
-      if (downShift || event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) {
-        return false;
-      }
-      const moved = Math.hypot(event.clientX - downX, event.clientY - downY);
-      // Threshold of 4px covers sub-pixel rounding and a small "accidental
-      // drift" during click. Anything more was a deliberate drag.
-      if (moved > 4) return false;
-      // Only collapse if CM produced a range (not a simple caret).
-      const sel = view.state.selection.main;
-      if (sel.from === sel.to) return false;
-      // Collapse to the head (where the mouseup landed) — matches what the
-      // user meant when they single-clicked.
-      view.dispatch({ selection: { anchor: sel.head } });
-      return false;
-    },
-  });
-})();
-
 export function richMarkdown(): Extension {
-  return [imageField, richMarkdownPlugin, imageClickHandler, clickCollapseHandler];
+  return [
+    mouseGestureTracker,
+    imageField,
+    richMarkdownPlugin,
+    imageClickHandler,
+  ];
 }

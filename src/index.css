@@ -415,29 +415,37 @@ mark.search-highlight[data-current="true"] {
   display: none;
 }
 
-/* Paragraph margins matching Tailwind prose (collapsed between consecutive
- * paragraphs = 1.25em; collapses with surrounding heading/list margins too). */
-.cm-line.cm-md-p-start { margin-top: 1.25em; }
-.cm-line.cm-md-p-end { margin-bottom: 1.25em; }
-/* Image-only paragraphs. View renders them as `<p><span.wrapper><img/></span></p>`
- * where the p→wrapper→img nesting yields an effective `prev→img` gap of
- * 1.25em (p margin) collapsed + `.cm-md-img`'s own 2em margin-top — about
- * 52px to the image's top edge. We mirror that with a 1.25em line-level
- * margin (collapses with neighbouring paragraph margins) plus the image's
- * own 2em margin inside the line. */
-.cm-line.cm-md-imgp-start { margin-top: 1.25em; }
-.cm-line.cm-md-imgp-end { margin-bottom: 1.25em; }
+/* Block spacing for cm-line decorations.
+ *
+ * CRITICAL: use `padding-top`, NOT `margin-*`, for vertical spacing on
+ * `.cm-line` decorations. CM's heightmap measures each cm-line via
+ * `getBoundingClientRect` — that includes padding but NOT margin.
+ * Across a long document with many spaced lines, accumulated margin
+ * heights that the heightmap can't see make `posAtCoords` return
+ * wrong positions: clicks elsewhere in the doc land on the wrong line
+ * or fail to move the cursor entirely. Keep all spacing INSIDE the
+ * cm-line box via padding.
+ *
+ * Rule: **each block type applies only `padding-top`** (never
+ * `padding-bottom`). The NEXT block's `padding-top` supplies the gap.
+ * This preserves single-sided spacing (same effective gaps as margin-
+ * collapse in view mode) without stacking two paddings into doubled
+ * gaps, and without letting any margin escape into CM's invisible
+ * layout. */
 
-/* List item spacing matching Tailwind prose. */
+.cm-line.cm-md-p-start     { padding-top: 1.25em; }
+.cm-line.cm-md-imgp-start  { padding-top: 1.25em; }
+
+/* List items: padding-left for indent. Small vertical spacing via
+ * `padding-top` only. */
 .cm-line.cm-md-li {
   padding-left: 1.625em;
-  margin-top: 0.5em;
-  margin-bottom: 0.5em;
+  padding-top: 0.25em;
 }
-.cm-line.cm-md-list-start { margin-top: 1.25em; }
-.cm-line.cm-md-list-end { margin-bottom: 1.25em; }
-.cm-line.cm-md-list-start-nested { margin-top: 0.75em; }
-.cm-line.cm-md-list-end-nested { margin-bottom: 0.75em; }
+
+/* Block-list boundaries. */
+.cm-line.cm-md-list-start         { padding-top: 1.25em; }
+.cm-line.cm-md-list-start-nested  { padding-top: 0.75em; }
 
 /* Image widgets. No `min-height` — it stretches small or wide-aspect
  * images. The `VP.Margin` patch + eager image loading + the image-size
@@ -454,65 +462,58 @@ mark.search-highlight[data-current="true"] {
 /* When the image is a BLOCK widget appended after a cm-line (i.e. the line
  * holds the cursor and shows raw `![alt](url)` markdown), the markdown text
  * and the image should sit tight against each other — not separated by the
- * usual 2em image margin plus the paragraph bottom margin. */
-.cm-line.cm-md-imgp-end:has(+ img.cm-md-img) {
-  margin-bottom: 0.25em;
-}
+ * usual 2em image margin. */
 .cm-line + img.cm-md-img {
   margin-top: 0 !important;
 }
 
-/* Heading sizes matching Tailwind prose. */
+/* Heading sizes matching Tailwind prose. Same padding-not-margin rule
+ * as paragraph/list spacing — put the space inside the line box so
+ * CM's heightmap sees it. */
 .cm-line.cm-md-h1 {
   font-size: 2.25em;
   font-weight: 800;
   line-height: 1.1111111;
-  margin-top: 0;
-  margin-bottom: 0.8888889em;
+  padding-top: 0;
 }
 .cm-line.cm-md-h2 {
   font-size: 1.5em;
   font-weight: 700;
   line-height: 1.3333333;
-  margin-top: 2em;
-  margin-bottom: 1em;
+  padding-top: 2em;
 }
 .cm-line.cm-md-h3 {
   font-size: 1.25em;
   font-weight: 600;
   line-height: 1.6;
-  margin-top: 1.6em;
-  margin-bottom: 0.6em;
+  padding-top: 1.6em;
 }
 .cm-line.cm-md-h4 {
   font-size: 1em;
   font-weight: 600;
   line-height: 1.5;
-  margin-top: 1.5em;
-  margin-bottom: 0.5em;
+  padding-top: 1.5em;
 }
 .cm-line.cm-md-h5 {
   font-size: 0.83em;
   font-weight: bold;
   line-height: 1.5;
-  margin-top: 1.67em;
-  margin-bottom: 1.67em;
+  padding-top: 1.67em;
 }
 .cm-line.cm-md-h6 {
   font-size: 0.67em;
   font-weight: bold;
   line-height: 1.5;
-  margin-top: 2.33em;
-  margin-bottom: 2.33em;
+  padding-top: 2.33em;
 }
-/* First heading in the editor shouldn't have extra top margin. */
+/* First heading in the editor shouldn't have extra top padding. */
 .cm-content > .cm-line.cm-md-h1:first-child,
 .cm-content > .cm-line.cm-md-h2:first-child,
 .cm-content > .cm-line.cm-md-h3:first-child,
 .cm-content > .cm-line.cm-md-h4:first-child,
 .cm-content > .cm-line.cm-md-h5:first-child,
 .cm-content > .cm-line.cm-md-h6:first-child {
-  margin-top: 0;
+  padding-top: 0;
 }
 
 

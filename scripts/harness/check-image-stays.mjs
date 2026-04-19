@@ -43,9 +43,17 @@ async function main() {
       const r = first.getBoundingClientRect();
       return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
     });
+    console.log('clicking image at:', JSON.stringify(box));
     await page.mouse.move(box.x, box.y);
     await page.mouse.down();
     await page.waitForTimeout(50);
+    const midDown = await page.evaluate(() => {
+      const view = (window).__cmView;
+      return view?.state?.selection?.main
+        ? { anchor: view.state.selection.main.anchor, line: view.state.doc.lineAt(view.state.selection.main.anchor).number, text: view.state.doc.lineAt(view.state.selection.main.anchor).text.slice(0, 40) }
+        : null;
+    });
+    console.log('mid-mousedown selection:', JSON.stringify(midDown));
     await page.mouse.up();
     await page.waitForTimeout(400);
 
