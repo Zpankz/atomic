@@ -569,6 +569,6 @@
 
 @media (max-width: 900px) {
   :is(.pm-eval-shell, .atomic-milkdown-editor) .milkdown .ProseMirror {
-    padding: 28px 24px 40px;
+    padding: 24px 14px 36px;
   }
 }

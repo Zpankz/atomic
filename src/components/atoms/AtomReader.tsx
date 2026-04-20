@@ -248,7 +248,7 @@ function AtomReaderContent({
       }`}
     >
       <div className="flex-1 overflow-y-auto scrollbar-auto-hide">
-        <div className="max-w-6xl mx-auto px-6 py-6 lg:flex lg:gap-10">
+        <div className="max-w-6xl mx-auto px-3 py-5 sm:px-4 sm:py-6 lg:px-6 lg:flex lg:gap-10">
           <div className="flex-1 min-w-0">
             <Suspense fallback={null}>
               <AtomicMilkdownEditor
